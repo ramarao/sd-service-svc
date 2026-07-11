@@ -1,0 +1,25 @@
+{
+  "name": "sd-service-svc",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Multi-provider on-site service platform (pickup \u2192 service \u2192 deliver) on Cloudflare Workers with WhatsApp Business API",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:local": "wrangler d1 execute sd-service-db --local --file=./schema.sql",
+    "db:remote": "wrangler d1 execute sd-service-db --remote --file=./schema.sql",
+    "seed:local": "wrangler d1 execute sd-service-db --local --file=./seed.sql",
+    "tail": "wrangler tail",
+    "setup:email": "node scripts/setup-email-routing.mjs"
+  },
+  "dependencies": {
+    "hono": "^4.6.14",
+    "jsqr": "^1.4.0",
+    "postal-mime": "^2.7.5",
+    "qrcode": "^1.5.4"
+  },
+  "devDependencies": {
+    "wrangler": "^4.107.1"
+  }
+}

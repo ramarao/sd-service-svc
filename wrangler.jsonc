@@ -1,0 +1,48 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "sd-service-svc",
+  "main": "src/index.js",
+  "compatibility_date": "2026-07-09",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+
+  // Keep the *.workers.dev URL alongside the custom domain.
+  "workers_dev": true,
+
+  // Custom domain — Cloudflare auto-creates the proxied DNS record + edge cert
+  // (zone manasanta.in must be in this account).
+  "routes": [
+    { "pattern": "dhobi-demo.manasanta.in", "custom_domain": true }
+  ],
+
+  // Static SPA (customer / admin / super-admin console) served from ./public.
+  // Dynamic routes run the Worker first; everything else is served as a static
+  // asset, with unknown paths falling back to index.html (client-side routing).
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/auth/*", "/webhook/*"]
+  },
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "sd-service-db",
+      "database_id": "5fd4f19f-b2e3-487a-988d-f2a313d76bd4"
+    }
+  ],
+
+  // Durable Object that broadcasts live "orders changed" events over WebSockets.
+  "durable_objects": {
+    "bindings": [{ "name": "ORDERS_HUB", "class_name": "OrdersHub" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["OrdersHub"] }]
+
+  // Secrets (set via `wrangler secret put <NAME>` — never commit these):
+  //   SESSION_SECRET       random 32+ byte string, signs session cookies
+  //   WA_TOKEN             Meta permanent access token (Bearer)
+  //   WA_APP_SECRET        Meta app secret, verifies webhook signatures
+  //   WA_VERIFY_TOKEN      arbitrary string you also paste into Meta webhook config
+  //   WA_PHONE_NUMBER_ID   fallback phone-number-id (providers can override per-row)
+}

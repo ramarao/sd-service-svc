@@ -1,0 +1,14 @@
+{
+  "name": "Admin — Scandeer",
+  "short_name": "Admin",
+  "description": "Manage orders, catalog, captains and staff for your service.",
+  "start_url": "/manager",
+  "scope": "/manager",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f4f3ee",
+  "theme_color": "#0e8074",
+  "icons": [
+    { "src": "/manager-icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
