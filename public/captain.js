@@ -24,7 +24,7 @@ const paidPill = (o) =>
   o.payment_status === "paid" ? `<span class="paid-pill">✅ Paid</span>`
   : o.payment_status === "failed" ? `<span class="paid-pill fail">❌ Failed</span>` : "";
 
-let state = { phone: "", name: "", providers: [], providerId: null, providerName: "" };
+let state = { phone: "", name: "", providers: [], providerId: null, providerName: "", flow: {}, brand: {}, paymentAfter: null };
 
 // ── Live updates (WebSocket → orders hub) ───────────────────────────────────
 let _ws = null, _wsProvider = null, _liveTimer = null;
@@ -47,6 +47,8 @@ function liveRefresh() {
 
 // ── Entry ─────────────────────────────────────────────────────────────────────
 async function boot() {
+  // The vertical's flow + branding drives terminology, job sections and actions.
+  try { const cfg = await api("/api/config"); state.flow = cfg.flow || {}; state.brand = cfg.brand || {}; state.paymentAfter = cfg.flow?.paymentAfter || null; } catch {}
   try {
     const me = await api("/api/captain/me");
     state.phone = me.phone; state.name = me.name || ""; state.providers = me.providers || [];
@@ -74,8 +76,9 @@ async function screenAuth() {
     ? `<a class="btn-link" href="${esc(info.waLink)}" target="_blank" rel="noopener">💬 Open WhatsApp &amp; send “capt”</a>`
     : "";
   const toWhom = info.number ? `+${esc(info.number)}` : "your provider's WhatsApp number";
+  const term = state.brand?.agentTerm || "Captain";
   h(`
-    <div class="cap-hero"><div class="cap-logo">🧢</div><h1>Captain</h1><p class="muted">Pickup &amp; delivery jobs</p></div>
+    <div class="cap-hero"><div class="cap-logo">🧢</div><h1>${esc(term)}</h1><p class="muted">Your assigned jobs</p></div>
     <div class="card">
       <h2 style="margin-top:0">Sign in from WhatsApp</h2>
       <p class="muted small">This app opens from WhatsApp. Send <b>capt</b> and tap the sign-in link we reply with.</p>
@@ -114,14 +117,20 @@ async function screenOrders() {
   catch (e) { h(`<div class="card"><p class="err">${esc(e.message || "Could not load orders.")}</p><button id="retry">Retry</button></div>`); document.getElementById("retry").onclick = screenOrders; return; }
 
   const jobs = data.jobs || [];
-  const pickups = jobs.filter((j) => j.action === "pickup");
-  const deliveries = jobs.filter((j) => j.action === "deliver");
+  // One section per flow advance step (jobs at that status awaiting this agent's
+  // action), then a "Recent" section for everything else.
+  const advance = state.flow?.advance || {};
   const done = jobs.filter((j) => !j.action);
 
   const canSwitch = state.providers.length > 1;
   const section = (title, list, emptyText) => `
     <h2 class="sec">${title} ${list.length ? `<span class="count">${list.length}</span>` : ""}</h2>
     ${list.length ? list.map(card).join("") : `<p class="muted small">${emptyText}</p>`}`;
+
+  const secHtml = Object.keys(advance).map((src) => {
+    const list = jobs.filter((j) => j.status === src && j.action);
+    return section(esc(advance[src].section || advance[src].label), list, "Nothing waiting.");
+  }).join("");
 
   h(`
     <div class="topbar">
@@ -133,8 +142,7 @@ async function screenOrders() {
     </div>
     <div id="capOrdersMarker" hidden></div>
     <div class="row grow0" style="justify-content:flex-end;margin:-2px 0 8px"><button class="ghost small" id="refresh">↻ Refresh</button></div>
-    ${section("🧢 To pick up", pickups, "No pickups waiting.")}
-    ${section("🛵 To deliver", deliveries, "No deliveries waiting.")}
+    ${secHtml}
     ${done.length ? section("Recent", done, "") : ""}`);
 
   if (canSwitch) document.getElementById("switch").onclick = screenProviders;
@@ -182,16 +190,14 @@ async function screenOrderDetail(orderId) {
     ? `<p class="muted small" style="margin:6px 0 0">Pickup contact: ${esc(o.contact_name || "")}${o.contact_phone ? ` · ${esc(o.contact_phone)}` : ""}</p>` : "";
   const mapLink = o.lat != null ? `<a href="https://www.google.com/maps?q=${o.lat},${o.lng}" target="_blank" rel="noopener">📍 Navigate</a>` : "";
 
+  const paymentAfter = d.paymentAfter || state.paymentAfter;
   let actionCard = "";
-  if (d.action === "pickup") {
-    actionCard = `<div class="card"><button id="act" data-act="pickup">Confirm pickup</button><p id="msg"></p></div>`;
-  } else if (d.action === "deliver") {
-    actionCard = `<div class="card"><button id="act" data-act="deliver">Confirm delivered</button><p id="msg"></p></div>`;
-  } else if (o.status === "DELIVERED") {
-    actionCard = `<div class="card"><p class="muted" style="margin:0 0 10px">Delivered ✓</p><button id="paybtn">💳 Show payment QR</button></div>`;
+  if (d.action) {
+    actionCard = `<div class="card"><button id="act">${esc(d.action.label)}</button><p id="msg"></p></div>`;
+  } else if (o.status === paymentAfter) {
+    actionCard = `<div class="card"><button id="paybtn">💳 Show payment QR</button></div>`;
   } else {
-    const note = ["PICKED_UP", "IN_SERVICE"].includes(o.status) ? "Picked up — items are locked." : "No action for you on this order right now.";
-    actionCard = `<div class="card"><p class="muted">${note}</p></div>`;
+    actionCard = `<div class="card"><p class="muted">No action for you on this order right now.</p></div>`;
   }
 
   h(`
@@ -216,24 +222,23 @@ async function screenOrderDetail(orderId) {
   const edit = document.getElementById("edit");
   if (edit) edit.onclick = () => screenEditItems(orderId);
   const act = document.getElementById("act");
-  if (act) act.onclick = () => confirmAction(orderId, act.dataset.act, act, document.getElementById("msg"));
+  if (act) act.onclick = () => confirmAction(orderId, d.action, act, document.getElementById("msg"));
   const paybtn = document.getElementById("paybtn");
   if (paybtn) paybtn.onclick = () => paymentScreen(orderId);
 }
 
-async function confirmAction(orderId, act, btn, msg) {
-  const label = act === "pickup" ? "picked up" : "delivered";
-  if (!confirm(`Confirm this order as ${label}? The customer will be notified.`)) return;
+async function confirmAction(orderId, action, btn, msg) {
+  if (!confirm(`${action.label}? The customer will be notified.`)) return;
   if (msg) { msg.textContent = ""; msg.className = ""; }
   btn.disabled = true; btn.textContent = "Confirming…";
   try {
-    await api(`/api/captain/orders/${encodeURIComponent(orderId)}/${act}`, { method: "POST" });
-    // After delivery, show the UPI payment QR so the customer can pay.
-    if (act === "deliver") paymentScreen(orderId);
+    const r = await api(`/api/captain/orders/${encodeURIComponent(orderId)}/advance`, { method: "POST", body: { to: action.to } });
+    // When this step reaches the pay-after status, show the UPI QR so the customer can pay.
+    if (action.paymentDue || r.paymentDue) paymentScreen(orderId);
     else screenOrders();
   } catch (e) {
     if (msg) { msg.className = "err"; msg.textContent = e.message === "forbidden" ? "This job is no longer available." : (e.message || "Could not update."); }
-    btn.disabled = false; btn.textContent = act === "pickup" ? "Confirm pickup" : "Confirm delivered";
+    btn.disabled = false; btn.textContent = action.label;
   }
 }
 

@@ -1,49 +1,9 @@
-// Thin D1 query helpers + the order state machine.
+// Thin D1 query helpers + the order state machine. The lifecycle rules live in
+// flow.js and are driven by the app's `flow` config (see config.js); this module
+// stays vertical-agnostic by passing `flow` through to those helpers.
 import { randomId } from "./crypto.js";
 import { notifyCustomer } from "./wa.js";
-
-// Linear (rankable) statuses, in order. REJECTED is a separate terminal branch.
-export const STATUS_FLOW = [
-  "REQUESTED",
-  "ACCEPTED",
-  "ASSIGNED",
-  "PICKED_UP",
-  "IN_SERVICE",
-  "OUT_FOR_DELIVERY",
-  "DELIVERED",
-];
-
-const RANK = Object.fromEntries(STATUS_FLOW.map((s, i) => [s, i]));
-const TERMINAL = new Set(["REJECTED", "DELIVERED"]);
-
-// Is a status change allowed? Enforces: accept/reject only from REQUESTED,
-// terminal statuses are final, and otherwise advance exactly one step forward
-// (no skipping, no going back).
-export function canTransition(from, to) {
-  if (from === to) return false;
-  if (TERMINAL.has(from)) return false; // rejected or delivered → no further action
-  if (to === "ACCEPTED" || to === "REJECTED") return from === "REQUESTED";
-  if (!(from in RANK) || !(to in RANK)) return false;
-  // Must be past REQUESTED (i.e. accepted) and move to the immediate next step.
-  return RANK[from] >= RANK.ACCEPTED && RANK[to] === RANK[from] + 1;
-}
-
-// Valid next statuses from a given status (drives the admin UI controls).
-export function allowedTransitions(from) {
-  if (TERMINAL.has(from)) return [];
-  if (from === "REQUESTED") return ["ACCEPTED", "REJECTED"];
-  return STATUS_FLOW.filter((s) => canTransition(from, s));
-}
-
-// Statuses that trigger a customer WhatsApp notification.
-const NOTIFY_STATUSES = new Set([
-  "ACCEPTED",
-  "REJECTED",
-  "PICKED_UP",
-  "IN_SERVICE",
-  "OUT_FOR_DELIVERY",
-  "DELIVERED",
-]);
+import { canTransition, notifyStatuses, assignmentAt, advanceStep } from "./flow.js";
 
 export function now() {
   return Date.now();
@@ -260,10 +220,10 @@ export async function managerName(db, phone) {
   return row?.name || null;
 }
 
-// Orders assigned to a captain (as pickup or delivery) within one provider.
-// Returns each with its items, total, the captain's role(s), and the action the
-// captain can take now (pickup | deliver | null).
-export async function listCaptainJobs(db, phone, providerId) {
+// Orders assigned to a field agent (either slot) within one provider. Returns
+// each with its items, total, the slot(s) the agent owns, and the advance action
+// the agent can take now ({ to, label, section } | null) — all flow-driven.
+export async function listCaptainJobs(db, flow, phone, providerId) {
   // COALESCE lets pre-snapshot orders fall back to the linked customer record.
   const { results: orders } = await db
     .prepare(
@@ -290,14 +250,15 @@ export async function listCaptainJobs(db, phone, providerId) {
     const its = byOrder.get(o.id) || [];
     const total = its.reduce((s, it) => s + it.qty * (it.unit_price || 0), 0);
     const roles = [];
-    if (o.captain_phone === phone) roles.push("pickup");
+    if (o.captain_phone === phone) roles.push("primary");
     if (o.delivery_captain_phone === phone) roles.push("delivery");
-    const action =
-      o.status === "ASSIGNED" && roles.includes("pickup")
-        ? "pickup"
-        : o.status === "OUT_FOR_DELIVERY" && roles.includes("delivery")
-        ? "deliver"
-        : null;
+    // The advance action, if this agent owns the slot that advances this status.
+    const step = advanceStep(flow, o.status);
+    let action = null;
+    if (step) {
+      const ownerPhone = step.slot === "delivery" ? o.delivery_captain_phone : o.captain_phone;
+      if (ownerPhone === phone) action = { to: step.to, label: step.label, section: step.section };
+    }
     return {
       id: o.id,
       status: o.status,
@@ -402,22 +363,24 @@ export async function getOrder(db, id) {
   return { ...order, items, events, total };
 }
 
-// Advance/transition status, write an event, and notify the customer.
-// Returns { order } or throws Error('invalid_transition').
-export async function transitionOrder(env, db, { orderId, toStatus, actor, agentName, captainPhone }) {
+// Advance/transition status, write an event, and notify the customer. Driven by
+// the app's `config` (config.flow). Returns { order } or throws Error.
+export async function transitionOrder(env, db, { config, orderId, toStatus, actor, agentName, captainPhone }) {
+  const flow = config.flow;
   const order = await db.prepare("SELECT * FROM orders WHERE id = ?").bind(orderId).first();
   if (!order) throw new Error("not_found");
 
-  if (!canTransition(order.status, toStatus)) throw new Error("invalid_transition");
+  if (!canTransition(flow, order.status, toStatus)) throw new Error("invalid_transition");
 
   const ts = now();
-  // Route the captain selection to the right slot: ASSIGNED sets the pickup
-  // captain, OUT_FOR_DELIVERY sets the delivery captain. Other steps carry no
-  // captain and leave both slots untouched.
-  const pickName = toStatus === "ASSIGNED" ? agentName || null : null;
-  const pickPhone = toStatus === "ASSIGNED" ? captainPhone || null : null;
-  const delivName = toStatus === "OUT_FOR_DELIVERY" ? agentName || null : null;
-  const delivPhone = toStatus === "OUT_FOR_DELIVERY" ? captainPhone || null : null;
+  // Route the field-agent selection into the slot this status assigns (if any).
+  // primary → agent_name/captain_phone, delivery → delivery_captain_*. A status
+  // that isn't an assignment point carries no agent and leaves both slots as-is.
+  const asg = assignmentAt(flow, toStatus);
+  const primaryName = asg?.slot === "primary" ? agentName || null : null;
+  const primaryPhone = asg?.slot === "primary" ? captainPhone || null : null;
+  const delivName = asg?.slot === "delivery" ? agentName || null : null;
+  const delivPhone = asg?.slot === "delivery" ? captainPhone || null : null;
   await db
     .prepare(
       "UPDATE orders SET status = ?, " +
@@ -425,7 +388,7 @@ export async function transitionOrder(env, db, { orderId, toStatus, actor, agent
         "delivery_captain_name = COALESCE(?, delivery_captain_name), delivery_captain_phone = COALESCE(?, delivery_captain_phone), " +
         "updated_at = ? WHERE id = ?"
     )
-    .bind(toStatus, pickName, pickPhone, delivName, delivPhone, ts, orderId)
+    .bind(toStatus, primaryName, primaryPhone, delivName, delivPhone, ts, orderId)
     .run();
   await db
     .prepare("INSERT INTO order_events (id, order_id, status, actor, at) VALUES (?,?,?,?,?)")
@@ -433,13 +396,13 @@ export async function transitionOrder(env, db, { orderId, toStatus, actor, agent
     .run();
 
   const full = await getOrder(db, orderId); // includes items + total
-  if (NOTIFY_STATUSES.has(toStatus)) {
+  if (notifyStatuses(flow).has(toStatus)) {
     const provider = await getProvider(db, order.provider_id);
     const customer = await getCustomer(db, order.customer_id);
     if (provider && customer) {
       const waCfg = await getWaConfig(env, db, provider);
       // Fire-and-log; a WhatsApp failure must not roll back the status change.
-      await notifyCustomer(waCfg, { provider, customer, status: toStatus, order: full }).catch((e) =>
+      await notifyCustomer(waCfg, { config, provider, customer, status: toStatus, order: full }).catch((e) =>
         console.error("[notify] failed", e)
       );
     }

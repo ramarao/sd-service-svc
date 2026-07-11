@@ -1,6 +1,7 @@
 // WhatsApp Business API helpers — signature verification, sending, and the
 // 24-hour-window notification gate that picks free-text vs. utility template.
 import { hmacHex, timingSafeEqual } from "./crypto.js";
+import { assignmentAt } from "./flow.js";
 
 const WINDOW_MS = 24 * 60 * 60 * 1000;
 
@@ -84,15 +85,18 @@ export function formatMoney(paise, cur = "INR") {
   return sym + (Number(paise || 0) / 100).toLocaleString("en-IN", { minimumFractionDigits: 0, maximumFractionDigits: 2 });
 }
 
-export async function notifyCustomer(waCfg, { provider, customer, status, order }) {
+export async function notifyCustomer(waCfg, { config, provider, customer, status, order }) {
+  const flow = config?.flow;
   const cfg = safeConfig(provider.config);
-  const label = cfg.statusLabels?.[status] || defaultLabel(status);
+  const label = cfg.statusLabels?.[status] || flow?.labels?.[status] || status;
   const amount = order.total ? `\nAmount: ${formatMoney(order.total, cfg.currency)}` : "";
-  // Name the relevant captain: pickup captain when assigned, delivery captain
-  // when out for delivery.
-  const capName = status === "ASSIGNED" ? order.agent_name : status === "OUT_FOR_DELIVERY" ? order.delivery_captain_name : null;
-  const capPhone = status === "ASSIGNED" ? order.captain_phone : status === "OUT_FOR_DELIVERY" ? order.delivery_captain_phone : null;
-  const captain = capName ? `\nCaptain: ${capName}${capPhone ? ` (+${capPhone})` : ""}` : "";
+  // Name the field agent for this status: when the status is an assignment point,
+  // read the slot it assigns. (Dhobi: OUT_FOR_DELIVERY names the delivery captain.)
+  const asg = flow ? assignmentAt(flow, status) : null;
+  const capName = asg?.slot === "delivery" ? order.delivery_captain_name : asg?.slot === "primary" ? order.agent_name : null;
+  const capPhone = asg?.slot === "delivery" ? order.delivery_captain_phone : asg?.slot === "primary" ? order.captain_phone : null;
+  const agentTerm = config?.brand?.agentTerm || "Captain";
+  const captain = capName ? `\n${agentTerm}: ${capName}${capPhone ? ` (+${capPhone})` : ""}` : "";
   const freeText = `${label}\nOrder ${order.id}${amount}${captain}`;
 
   let payload;
@@ -117,19 +121,4 @@ export function safeConfig(raw) {
   } catch {
     return {};
   }
-}
-
-function defaultLabel(status) {
-  return (
-    {
-      REQUESTED: "We received your request",
-      ACCEPTED: "Your request has been accepted",
-      REJECTED: "Sorry, we couldn't accept your request this time",
-      ASSIGNED: "A captain has been assigned to your order",
-      PICKED_UP: "We've collected your items",
-      IN_SERVICE: "Your order is being processed",
-      OUT_FOR_DELIVERY: "Out for delivery",
-      DELIVERED: "Delivered — thank you!",
-    }[status] || status
-  );
 }
