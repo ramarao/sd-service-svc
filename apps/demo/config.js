@@ -4,7 +4,7 @@
 // so this config only carries town branding + a default vertical fallback.
 export default {
   brand: {
-    name: "Scandeer",
+    name: "Manasanta",
     host: "demo.manasanta.in", // used to build WhatsApp magic-links from the webhook
   },
   defaultVertical: "laundry",

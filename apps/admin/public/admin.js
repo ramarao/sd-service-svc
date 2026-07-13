@@ -82,7 +82,7 @@ function cfTokenLink(accountId) {
   ];
   const p = new URLSearchParams();
   p.set("permissionGroupKeys", JSON.stringify(perms));
-  p.set("name", "Scandeer Town Deploy");
+  p.set("name", "Manasanta Town Deploy");
   if (accountId) p.set("accountId", accountId);
   return "https://dash.cloudflare.com/profile/api-tokens/create?" + p.toString();
 }

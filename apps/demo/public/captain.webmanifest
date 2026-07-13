@@ -1,7 +1,7 @@
 {
-  "name": "Field agent — Scandeer",
+  "name": "Field agent — Manasanta",
   "short_name": "Agent",
-  "description": "Assigned jobs for Scandeer field agents (pickup, delivery, on-site).",
+  "description": "Assigned jobs for Manasanta field agents (pickup, delivery, on-site).",
   "start_url": "/captain",
   "scope": "/captain",
   "display": "standalone",

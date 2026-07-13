@@ -1,7 +1,7 @@
 {
-  "name": "Admin — Scandeer",
+  "name": "Admin — Manasanta",
   "short_name": "Admin",
-  "description": "Manage orders, catalog, agents and staff for your Scandeer shop.",
+  "description": "Manage orders, catalog, agents and staff for your Manasanta shop.",
   "start_url": "/manager",
   "scope": "/manager",
   "display": "standalone",
