@@ -132,6 +132,11 @@ export async function deployTown(env, db, target, spec, { dryRun = true } = {}) 
 
   const assetsJwt = await uploadAssets(env, target, workerName);
 
+  // Only apply the DO migration on the FIRST upload — a re-upload of an existing
+  // worker (already at tag v1) must NOT re-send "create v1" or CF 412s.
+  let workerExists = false;
+  try { await cf(target, `/accounts/${acct}/workers/scripts/${workerName}/settings`); workerExists = true; } catch { /* new worker */ }
+
   const bundle = await (await readAsset(env, "worker.js")).text();
   const metadata = {
     main_module: "worker.js",
@@ -142,7 +147,7 @@ export async function deployTown(env, db, target, spec, { dryRun = true } = {}) 
       { type: "durable_object_namespace", name: "ORDERS_HUB", class_name: "OrdersHub" },
       { type: "assets", name: "ASSETS" },
     ],
-    migrations: { new_tag: "v1", new_sqlite_classes: ["OrdersHub"] },
+    ...(workerExists ? {} : { migrations: { new_tag: "v1", new_sqlite_classes: ["OrdersHub"] } }),
     assets: { jwt: assetsJwt, config: { not_found_handling: "single-page-application", run_worker_first: ["/api/*", "/auth/*", "/webhook/*"] } },
     observability: { enabled: true },
   };
