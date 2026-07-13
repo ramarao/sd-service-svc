@@ -151,20 +151,22 @@ async function handleWebhook(env, body) {
   // sign-in link carrying a signed token for their verified number. Tapping it
   // opens the Captain app already authenticated.
   if (/^\s*capt(?:ain)?\b/i.test(text)) {
+    const term = CONFIG?.brand?.agentTerm || "Captain";
+    const lower = term.toLowerCase();
     const capProviders = await getCaptainProviders(env.DB, from);
     if (capProviders.length) {
       const t = await mintLinkToken(env, { cap: 1, ph: from });
       const link = `https://${host}/auth/captain/wa/${t}`;
       const name = await captainName(env.DB, from);
-      await sendWhatsApp(waCfg, from, ctaUrlPayload(`Hi${name ? " " + name : ""}! Tap below to open your Captain app — you'll be signed in automatically.`, "Open Captain app", link));
+      await sendWhatsApp(waCfg, from, ctaUrlPayload(`Hi${name ? " " + name : ""}! Tap below to open your ${term} app — you'll be signed in automatically.`, `Open ${term} app`, link));
     } else {
       await sendWhatsApp(
         waCfg,
         from,
         textPayload(
-          `🚫 *You're not a captain yet*\n\n` +
-            `This number isn't registered as a captain for *${provider.name}* or any other provider.\n\n` +
-            `👉 Ask your provider to add you as a captain using *this WhatsApp number*, then send *login* again.`
+          `🚫 *You're not a ${lower} yet*\n\n` +
+            `This number isn't registered as a ${lower} for *${provider.name}* or any other provider.\n\n` +
+            `👉 Ask your provider to add you as a ${lower} using *this WhatsApp number*, then send *capt* again.`
         )
       );
     }

@@ -1,0 +1,44 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "sd-homeease-svc",
+  "main": "src/index.js",
+  "compatibility_date": "2026-07-09",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+
+  "workers_dev": true,
+
+  // Custom domain — confirm/adjust at deploy time (zone manasanta.in in this account).
+  "routes": [
+    { "pattern": "homeease-demo.manasanta.in", "custom_domain": true }
+  ],
+
+  // Static SPA (customer / technician / manager / console) served from ./public.
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/auth/*", "/webhook/*"]
+  },
+
+  // Own D1 — separate from Dhobi. Create with:
+  //   wrangler d1 create sd-homeease-db
+  // then paste the returned database_id here. (Local dev keys on database_name,
+  // so `wrangler dev --local` works before the remote DB exists.)
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "sd-homeease-db",
+      "database_id": "00000000-0000-0000-0000-000000000000"
+    }
+  ],
+
+  // Own Durable Object namespace + fresh migration (independent from Dhobi's).
+  "durable_objects": {
+    "bindings": [{ "name": "ORDERS_HUB", "class_name": "OrdersHub" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["OrdersHub"] }]
+
+  // Secrets (set via `wrangler secret put <NAME> -c apps/homeease/wrangler.jsonc`):
+  //   SESSION_SECRET, WA_TOKEN, WA_APP_SECRET, WA_VERIFY_TOKEN, WA_PHONE_NUMBER_ID
+}
