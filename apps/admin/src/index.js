@@ -8,6 +8,7 @@ import { Hono } from "hono";
 import { setCookie, deleteCookie, getCookie } from "hono/cookie";
 import { randomId, hashPassword, verifyPassword } from "../../../core/crypto.js";
 import { issueSession, readSession, requireRole, COOKIE_NAME, sessionCookieOpts } from "../../../core/session.js";
+import { deployTown } from "./deploy.js";
 
 const app = new Hono();
 const now = () => Date.now();
@@ -127,6 +128,39 @@ app.get("/api/towns/:id/providers/:rest/catalog", requireRole("super_admin"), as
   if (!town) return c.json({ error: "town_not_found" }, 404);
   const r = await callTown(town, `/api/control/providers/${c.req.param("rest")}/catalog`);
   return c.json(r.data, r.status);
+});
+
+// ── Deploy targets (Cloudflare accounts + tokens) ─────────────────────────────
+app.get("/api/targets", requireRole("super_admin"), async (c) => {
+  const { results } = await c.env.DB.prepare("SELECT id, label, cf_account_id, zone_id, created_at FROM deploy_targets ORDER BY created_at DESC").all();
+  return c.json({ targets: results || [] }); // never returns the token
+});
+app.post("/api/targets", requireRole("super_admin"), async (c) => {
+  const { label, cf_account_id, cf_api_token, zone_id } = await c.req.json().catch(() => ({}));
+  if (!label || !cf_account_id || !cf_api_token) return c.json({ error: "missing", need: "label, cf_account_id, cf_api_token" }, 400);
+  const id = randomId();
+  await c.env.DB.prepare("INSERT INTO deploy_targets (id, label, cf_account_id, cf_api_token, zone_id, created_at) VALUES (?,?,?,?,?,?)")
+    .bind(id, label, cf_account_id, cf_api_token, zone_id || null, now()).run();
+  return c.json({ ok: true, id });
+});
+app.delete("/api/targets/:id", requireRole("super_admin"), async (c) => {
+  await c.env.DB.prepare("DELETE FROM deploy_targets WHERE id = ?").bind(c.req.param("id")).run();
+  return c.json({ ok: true });
+});
+
+// Deploy a new town Worker to a target CF account. dryRun (default) returns the
+// plan of Cloudflare API calls without executing; dryRun:false performs the deploy.
+app.post("/api/deploy", requireRole("super_admin"), async (c) => {
+  const { targetId, spec, dryRun } = await c.req.json().catch(() => ({}));
+  const target = await c.env.DB.prepare("SELECT * FROM deploy_targets WHERE id = ?").bind(targetId).first();
+  if (!target) return c.json({ error: "target_not_found" }, 404);
+  if (!spec?.slug || !spec?.name || !spec?.domain) return c.json({ error: "missing", need: "spec.slug, spec.name, spec.domain" }, 400);
+  try {
+    const result = await deployTown(c.env, c.env.DB, target, spec, { dryRun: dryRun !== false });
+    return c.json(result);
+  } catch (e) {
+    return c.json({ error: "deploy_failed", detail: String(e.message || e) }, 500);
+  }
 });
 
 app.get("/api/health", (c) => c.json({ ok: true, service: "sd-admin-svc" }));

@@ -13,10 +13,11 @@
     "db:remote": "wrangler d1 execute sd-service-db --remote -c apps/dhobi/wrangler.jsonc --file=./apps/dhobi/schema.sql",
     "seed:local": "wrangler d1 execute sd-service-db --local -c apps/dhobi/wrangler.jsonc --file=./apps/dhobi/seed.sql",
     "tail": "wrangler tail -c apps/dhobi/wrangler.jsonc",
-    "dev:homeease": "wrangler dev -c apps/homeease/wrangler.jsonc --port 8788",
-    "deploy:homeease": "wrangler deploy -c apps/homeease/wrangler.jsonc",
-    "db:local:homeease": "wrangler d1 execute sd-homeease-db --local -c apps/homeease/wrangler.jsonc --file=./apps/homeease/schema.sql",
-    "seed:local:homeease": "wrangler d1 execute sd-homeease-db --local -c apps/homeease/wrangler.jsonc --file=./apps/homeease/seed.sql",
+    "dev:demo": "wrangler dev -c apps/demo/wrangler.jsonc --port 8790",
+    "deploy:demo": "wrangler deploy -c apps/demo/wrangler.jsonc",
+    "dev:admin": "wrangler dev -c apps/admin/wrangler.jsonc --port 8791",
+    "deploy:admin": "wrangler deploy -c apps/admin/wrangler.jsonc",
+    "build:town-bundle": "node scripts/build-town-bundle.mjs",
     "setup:email": "node scripts/setup-email-routing.mjs"
   },
   "dependencies": {

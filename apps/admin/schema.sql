@@ -8,6 +8,17 @@ CREATE TABLE IF NOT EXISTS admin_users (
   created_at INTEGER NOT NULL
 );
 
+-- Cloudflare accounts the control plane can deploy town Workers onto. The
+-- cf_api_token is a scoped account token (Workers Scripts + D1 + Workers Routes edit).
+CREATE TABLE IF NOT EXISTS deploy_targets (
+  id            TEXT PRIMARY KEY,
+  label         TEXT NOT NULL,              -- e.g. "ramarao.satti@gmail.com"
+  cf_account_id TEXT NOT NULL,
+  cf_api_token  TEXT NOT NULL,
+  zone_id       TEXT,                        -- zone for the custom domain (manasanta.in)
+  created_at    INTEGER NOT NULL
+);
+
 -- One row per town (a deployed marketplace Worker, possibly on another CF account).
 -- The control_token is that town's CONTROL_TOKEN secret; url is its base origin.
 CREATE TABLE IF NOT EXISTS towns (

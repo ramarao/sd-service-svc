@@ -35,10 +35,11 @@ function screenLogin() {
 }
 
 async function townsList() {
-  h(`<div class="topbar"><h1>Towns</h1><div class="row grow0" style="gap:6px"><button class="small" id="add">+ Town</button><button class="ghost small" id="out">Log out</button></div></div>
+  h(`<div class="topbar"><h1>Towns</h1><div class="row grow0" style="gap:6px"><button class="small" id="dep">⚡ Deploy</button><button class="ghost small" id="add">+ Register</button><button class="ghost small" id="out">Log out</button></div></div>
      <div id="list"><p class="muted">Loading…</p></div>`);
   document.getElementById("out").onclick = async () => { await api("/auth/logout", { method: "POST" }); screenLogin(); };
   document.getElementById("add").onclick = addTownForm;
+  document.getElementById("dep").onclick = deployFlow;
   let towns = [];
   try { towns = (await api("/api/towns")).towns || []; } catch (e) { document.getElementById("list").innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
   document.getElementById("list").innerHTML = towns.length
@@ -70,6 +71,59 @@ function addTownForm() {
   };
 }
 const v = (id) => document.getElementById(id).value.trim();
+
+// ── Deploy a new town Worker onto a Cloudflare account ───────────────────────
+async function deployFlow() {
+  h(`<div class="topbar"><h1>Deploy town</h1><button class="ghost small" id="back">←</button></div><div id="body"><p class="muted">Loading…</p></div>`);
+  document.getElementById("back").onclick = townsList;
+  let targets = [];
+  try { targets = (await api("/api/targets")).targets || []; } catch {}
+  const opts = targets.map((t) => `<option value="${esc(t.id)}">${esc(t.label)} · ${esc(t.cf_account_id)}</option>`).join("");
+  document.getElementById("body").innerHTML = `
+    <div class="card">
+      <div class="row" style="align-items:baseline"><h2 style="margin:0;flex:1">Cloudflare accounts</h2><button class="ghost small grow0" id="addt">+ Account</button></div>
+      ${targets.length ? targets.map((t) => `<div class="order-line"><div><strong>${esc(t.label)}</strong><br><span class="muted small">${esc(t.cf_account_id)}${t.zone_id ? " · zone " + esc(t.zone_id) : ""}</span></div><button class="ghost small delt" data-id="${esc(t.id)}">✕</button></div>`).join("") : '<p class="muted small">No accounts yet. Add one (with a scoped CF API token) to deploy onto.</p>'}
+    </div>
+    <div class="card">
+      <h2 style="margin-top:0">New town</h2>
+      <label>Deploy to account</label><select id="target">${opts || '<option value="">— add an account first —</option>'}</select>
+      <label style="margin-top:8px">Name</label><input id="name" placeholder="Bangalore" />
+      <label style="margin-top:8px">Slug</label><input id="slug" placeholder="bangalore" />
+      <label style="margin-top:8px">Domain</label><input id="domain" placeholder="bangalore.manasanta.in" />
+      <label style="margin-top:8px">WhatsApp number (optional)</label><input id="wa" placeholder="9188…" />
+      <div class="row" style="margin-top:12px;gap:8px"><button class="ghost grow0" id="plan">Preview plan</button><button class="grow0" id="go">Deploy for real</button></div>
+      <pre id="out" class="muted small" style="white-space:pre-wrap;margin-top:10px"></pre>
+    </div>`;
+  document.getElementById("addt").onclick = addTargetForm;
+  el.querySelectorAll(".delt").forEach((b) => (b.onclick = async () => { if (confirm("Remove this account + its token?")) { await api(`/api/targets/${b.dataset.id}`, { method: "DELETE" }); deployFlow(); } }));
+  const spec = () => ({ name: v("name"), slug: v("slug"), domain: v("domain"), wa_number: v("wa") });
+  const run = async (dryRun) => {
+    const out = document.getElementById("out"); out.className = "muted small"; out.textContent = dryRun ? "Planning…" : "Deploying… (creates real resources)";
+    try {
+      const r = await api("/api/deploy", { method: "POST", body: { targetId: v("target"), spec: spec(), dryRun } });
+      if (r.dryRun) out.textContent = `Plan for ${r.worker} (${r.domain}):\n` + r.plan.map((p, i) => `${i + 1}. [${p.method}] ${p.title}${p.note ? " → " + p.note : ""}`).join("\n");
+      else { out.textContent = `✓ Deployed ${r.worker} → https://${r.domain}`; setTimeout(townsList, 1200); }
+    } catch (e) { out.className = "err small"; out.textContent = (e.data?.detail || e.message); }
+  };
+  document.getElementById("plan").onclick = () => run(true);
+  document.getElementById("go").onclick = () => { if (confirm("Deploy for real? This creates a Worker + D1 + domain on the selected Cloudflare account.")) run(false); };
+}
+
+function addTargetForm() {
+  h(`<div class="topbar"><h1>Add CF account</h1><button class="ghost small" id="back">←</button></div>
+     <div class="card"><p class="muted small">A scoped Cloudflare API token (Workers Scripts + D1 + Workers Routes edit) for the account towns deploy onto. Stored server-side; never shown again.</p>
+       <label>Label</label><input id="label" placeholder="ramarao.satti@gmail.com" />
+       <label style="margin-top:8px">Account ID</label><input id="acct" />
+       <label style="margin-top:8px">API token</label><input id="tok" type="password" />
+       <label style="margin-top:8px">Zone ID (for custom domains, optional)</label><input id="zone" />
+       <button id="save" style="margin-top:14px">Add account</button><p id="msg" class="err"></p></div>`);
+  document.getElementById("back").onclick = deployFlow;
+  document.getElementById("save").onclick = async () => {
+    const msg = document.getElementById("msg"); msg.textContent = "";
+    try { await api("/api/targets", { method: "POST", body: { label: v("label"), cf_account_id: v("acct"), cf_api_token: v("tok"), zone_id: v("zone") } }); deployFlow(); }
+    catch (e) { msg.textContent = e.message + (e.data?.need ? " — need: " + e.data.need : ""); }
+  };
+}
 
 async function townDetail(id) {
   h(`<div class="topbar"><h1>Town</h1><button class="ghost small" id="back">←</button></div><p class="muted">Connecting…</p>`);
