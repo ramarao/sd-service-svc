@@ -72,6 +72,20 @@ function addTownForm() {
 }
 const v = (id) => document.getElementById(id).value.trim();
 const slugify = (s) => String(s || "").toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+// Cloudflare "Create Token" deep-link pre-filled with exactly the perms a town deploy needs.
+function cfTokenLink(accountId) {
+  const perms = [
+    { key: "d1", type: "edit" },              // Account · D1
+    { key: "workers_scripts", type: "edit" }, // Account · Workers Scripts
+    { key: "workers_routes", type: "edit" },  // Zone · Workers Routes
+    { key: "dns_records", type: "edit" },      // Zone · DNS (custom domain)
+  ];
+  const p = new URLSearchParams();
+  p.set("permissionGroupKeys", JSON.stringify(perms));
+  p.set("name", "Scandeer Town Deploy");
+  if (accountId) p.set("accountId", accountId);
+  return "https://dash.cloudflare.com/profile/api-tokens/create?" + p.toString();
+}
 
 // ── Deploy a new town Worker onto a Cloudflare account ───────────────────────
 async function deployFlow() {
@@ -129,13 +143,16 @@ async function deployFlow() {
 
 function addTargetForm() {
   h(`<div class="topbar"><h1>Add CF account</h1><button class="ghost small" id="back">←</button></div>
-     <div class="card"><p class="muted small">A scoped Cloudflare API token (Workers Scripts + D1 + Workers Routes edit) for the account towns deploy onto. Stored server-side; never shown again.</p>
+     <div class="card"><p class="muted small">A scoped Cloudflare API token for the account towns deploy onto. Stored server-side; never shown again.</p>
        <label>Label</label><input id="label" placeholder="ramarao.satti@gmail.com" />
        <label style="margin-top:8px">Account ID</label><input id="acct" />
        <label style="margin-top:8px">API token</label><input id="tok" type="password" />
-       <label style="margin-top:8px">Zone ID (for custom domains, optional)</label><input id="zone" />
+       <p class="small" style="margin:8px 0 0">🔗 <a href="#" id="mktoken">Create a token with the right permissions →</a> <span class="muted">(D1 · Workers Scripts · Workers Routes · DNS — all Edit)</span></p>
+       <p class="muted small" style="margin:2px 0 0">Opens Cloudflare pre-filled. Then set <b>Zone Resources → manasanta.in</b>, create it, and paste it above.</p>
+       <label style="margin-top:8px">Zone ID (for custom domains) — from your zone's Overview page</label><input id="zone" placeholder="32-char hex zone id" />
        <button id="save" style="margin-top:14px">Add account</button><p id="msg" class="err"></p></div>`);
   document.getElementById("back").onclick = deployFlow;
+  document.getElementById("mktoken").onclick = (e) => { e.preventDefault(); window.open(cfTokenLink(v("acct")), "_blank", "noopener"); };
   document.getElementById("save").onclick = async () => {
     const msg = document.getElementById("msg"); msg.textContent = "";
     try { await api("/api/targets", { method: "POST", body: { label: v("label"), cf_account_id: v("acct"), cf_api_token: v("tok"), zone_id: v("zone") } }); deployFlow(); }
