@@ -1,0 +1,40 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "sd-demo-svc",
+  "main": "src/index.js",
+  "compatibility_date": "2026-07-09",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+
+  "workers_dev": true,
+
+  // Custom domain for this town (confirm/adjust at deploy; zone in the CF account).
+  "routes": [
+    { "pattern": "demo.manasanta.in", "custom_domain": true }
+  ],
+
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/auth/*", "/webhook/*"]
+  },
+
+  // This town's own D1. Create with `wrangler d1 create sd-demo-db` and paste the id.
+  // (Local dev keys on database_name, so `wrangler dev --local` works before it exists.)
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "sd-demo-db",
+      "database_id": "00000000-0000-0000-0000-000000000000"
+    }
+  ],
+
+  "durable_objects": {
+    "bindings": [{ "name": "ORDERS_HUB", "class_name": "OrdersHub" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["OrdersHub"] }]
+
+  // Secrets per town: SESSION_SECRET, WA_TOKEN, WA_APP_SECRET, WA_VERIFY_TOKEN,
+  // WA_PHONE_NUMBER_ID, PUBLIC_HOST, CONTROL_TOKEN (for the super-admin control plane).
+}

@@ -1,0 +1,433 @@
+// Manager/admin PWA. WhatsApp-only sign-in (text "admin" or "manager"). Pick a
+// provider, then manage Orders / Items / Categories / Captains, plus Managers if
+// you're the admin tier. Reuses the same API the super-admin console uses.
+const el = document.getElementById("app");
+
+const api = async (path, opts = {}) => {
+  const res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts, body: opts.body ? JSON.stringify(opts.body) : undefined });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw Object.assign(new Error(data.error || res.statusText), { data });
+  return data;
+};
+const h = (html) => { el.innerHTML = html; window.scrollTo(0, 0); };
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const badge = (s) => `<span class="badge ${esc(s)}">${esc(s.replace(/_/g, " "))}</span>`;
+const fmtDate = (ms) => new Date(ms).toLocaleString();
+const CUR = { INR: "₹", USD: "$", EUR: "€", GBP: "£" };
+const money = (paise) => "₹" + (Number(paise || 0) / 100).toLocaleString("en-IN", { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+const paidPill = (o) =>
+  o.payment_status === "paid" ? `<span class="paid-pill">✅ Paid</span>`
+  : o.payment_status === "failed" ? `<span class="paid-pill fail">❌ Failed</span>` : "";
+
+function openModal(title, innerHTML) {
+  closeModal();
+  const ov = document.createElement("div");
+  ov.className = "modal-overlay"; ov.id = "modal-overlay";
+  ov.innerHTML = `<div class="modal"><div class="modal-head"><h2>${esc(title)}</h2><button class="modal-x" id="modal-x">×</button></div><div class="modal-body">${innerHTML}</div></div>`;
+  document.body.appendChild(ov);
+  ov.addEventListener("click", (e) => { if (e.target === ov) closeModal(); });
+  document.getElementById("modal-x").onclick = closeModal;
+  return ov;
+}
+function closeModal() { const m = document.getElementById("modal-overlay"); if (m) m.remove(); }
+
+let state = { phone: "", name: "", providers: [], providerId: null, providerName: "", tier: null, tab: "orders", flow: {}, brand: {} };
+
+// Status buckets derived from the flow config (works for any vertical).
+function statusBuckets() {
+  const f = state.flow || {}, term = f.terminal || [], from = f.decision?.from, reject = f.decision?.reject;
+  const active = (f.statuses || []).filter((s) => s !== from && !term.includes(s));
+  return { from, active, terminal: term, reject };
+}
+
+// ── Live updates (WebSocket → orders hub) ───────────────────────────────────
+let _ws = null, _wsProvider = null, _liveTimer = null;
+function liveConnect(provider) {
+  if (!provider) return;
+  if (_ws && _wsProvider === provider && _ws.readyState <= 1) return;
+  _wsProvider = provider;
+  try { if (_ws) _ws.close(); } catch {}
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  const ws = (_ws = new WebSocket(`${proto}//${location.host}/api/ws?provider=${encodeURIComponent(provider)}`));
+  ws.onmessage = (e) => { try { if (JSON.parse(e.data).type === "orders_changed") liveRefresh(); } catch {} };
+  ws.onclose = () => { if (_ws === ws) { _ws = null; setTimeout(() => { if (_wsProvider) liveConnect(_wsProvider); }, 3000); } };
+}
+function liveDisconnect() { _wsProvider = null; try { if (_ws) _ws.close(); } catch {} _ws = null; }
+function liveRefresh() {
+  clearTimeout(_liveTimer);
+  _liveTimer = setTimeout(() => { if (document.getElementById("mgrOrdersMarker")) tabOrders(); }, 400);
+}
+
+// ── Entry ───────────────────────────────────────────────────────────────────
+async function boot() {
+  try { const cfg = await api("/api/config"); state.flow = cfg.flow || {}; state.brand = cfg.brand || {}; } catch {}
+  let me;
+  try { me = await api("/api/manager/me"); } catch { return screenAuth(); }
+  state.phone = me.phone; state.name = me.name || ""; state.providers = me.providers || [];
+  if (me.provider_id) {
+    const p = state.providers.find((x) => x.id === me.provider_id);
+    state.providerId = me.provider_id; state.providerName = p?.name || ""; state.tier = me.tier;
+    dashboard();
+  } else if (state.providers.length === 1) {
+    selectProvider(state.providers[0]);
+  } else {
+    screenProviders();
+  }
+}
+
+async function selectProvider(p) {
+  h(`<div class="cap-hero"><div class="cap-logo">🗂️</div><p class="muted">Opening ${esc(p.name)}…</p></div>`);
+  try {
+    const r = await api("/api/manager/select", { method: "POST", body: { providerId: p.id } });
+    state.providerId = p.id; state.providerName = r.provider.name; state.tier = r.tier; state.tab = "orders";
+    dashboard();
+  } catch (e) { screenProviders(e.message); }
+}
+
+// ── Screen: not signed in → open WhatsApp and send "admin" ──────────────────
+async function screenAuth() {
+  let info = {};
+  try { info = await api("/auth/manager/wa-login/info"); } catch {}
+  const openBtn = info.waLink ? `<a class="btn-link" href="${esc(info.waLink)}" target="_blank" rel="noopener">💬 Open WhatsApp &amp; send “admin”</a>` : "";
+  const toWhom = info.number ? `+${esc(info.number)}` : "your provider's WhatsApp number";
+  h(`
+    <div class="cap-hero"><div class="cap-logo">🗂️</div><h1>Admin</h1><p class="muted">Run your service</p></div>
+    <div class="card">
+      <h2 style="margin-top:0">Sign in from WhatsApp</h2>
+      <p class="muted small">This app opens from WhatsApp. Send <b>admin</b> (or <b>manager</b>) and tap the sign-in link we reply with.</p>
+      ${openBtn}
+      <ol class="steps">
+        <li>On WhatsApp, send <b>admin</b> to ${toWhom}.</li>
+        <li>You'll get a reply with an <b>Open admin app</b> button.</li>
+        <li>Tap it — you'll be signed in here automatically.</li>
+      </ol>
+    </div>`);
+}
+
+// ── Screen: choose provider ─────────────────────────────────────────────────
+function screenProviders(err) {
+  const rows = state.providers.map((p) =>
+    `<button class="ghost prov" data-id="${esc(p.id)}"><span>${esc(p.name)} <span class="tag">${esc(p.tier)}</span></span><span class="chev">›</span></button>`).join("");
+  h(`
+    <div class="topbar"><h1>Choose provider</h1><button class="ghost small" id="logout">Log out</button></div>
+    ${err ? `<p class="err">${esc(err)}</p>` : ""}
+    <p class="muted">Pick a service to manage.</p>
+    <div class="stack">${rows}</div>`);
+  document.getElementById("logout").onclick = logout;
+  el.querySelectorAll(".prov").forEach((b) => (b.onclick = () => selectProvider(state.providers.find((p) => p.id === b.dataset.id))));
+}
+
+// ── Dashboard shell (tab bar) ───────────────────────────────────────────────
+async function dashboard() {
+  liveConnect(state.providerId);
+  // Resolve THIS provider's flow (a manager may run providers across verticals).
+  try { const fl = await api(`/api/flow?provider=${encodeURIComponent(state.providerId)}`); if (fl.flow) state.flow = fl.flow; } catch {}
+  const tabs = [
+    { key: "orders", label: "Orders" },
+    { key: "items", label: "Items" },
+    { key: "categories", label: "Categories" },
+    { key: "captains", label: "Captains" },
+  ];
+  if (state.tier === "admin") tabs.push({ key: "managers", label: "Managers" }, { key: "payment", label: "Payment" });
+  const canSwitch = state.providers.length > 1;
+  h(`
+    <div class="topbar">
+      <div><h1 style="margin:0">${esc(state.providerName)}</h1><span class="muted small">${esc(state.name || state.phone)} · ${esc(state.tier)}</span></div>
+      <div class="row grow0" style="gap:6px">
+        ${canSwitch ? `<button class="ghost small" id="switch">Switch</button>` : ""}
+        <button class="ghost small" id="logout">Log out</button>
+      </div>
+    </div>
+    <div class="tabbar" id="tabbar">${tabs.map((t) => `<button class="tabbtn${t.key === state.tab ? " active" : ""}" data-tab="${t.key}">${t.label}</button>`).join("")}</div>
+    <div id="content"></div>`);
+  if (canSwitch) document.getElementById("switch").onclick = screenProviders;
+  document.getElementById("logout").onclick = logout;
+  document.querySelectorAll("#tabbar .tabbtn").forEach((b) => (b.onclick = () => { state.tab = b.dataset.tab; dashboard(); }));
+  renderTab();
+}
+const content = () => document.getElementById("content");
+function renderTab() {
+  ({ orders: tabOrders, items: tabItems, categories: tabCategories, captains: tabCaptains, managers: tabManagers, payment: tabPayment }[state.tab] || tabOrders)();
+}
+const pid = () => encodeURIComponent(state.providerId);
+
+// ── Tab: Orders ─────────────────────────────────────────────────────────────
+async function tabOrders() {
+  content().innerHTML = `<p class="muted">Loading orders…</p>`;
+  let orders = [];
+  try { orders = (await api(`/api/admin/orders`)).orders || []; } catch (e) { content().innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+  const B = statusBuckets();
+  const groups = [
+    { key: "REQUESTED", label: "🆕 New requests", match: (s) => s === B.from },
+    { key: "ACTIVE", label: "In progress", match: (s) => B.active.includes(s) },
+    { key: "DONE", label: "Completed", match: (s) => B.terminal.includes(s) },
+  ];
+  const row = (o) => `<div class="card job tap" data-id="${esc(o.id)}">
+      <div class="row" style="align-items:baseline"><strong style="flex:1">${esc(o.id)}</strong>${badge(o.status)}<span class="chev" style="margin-left:6px">›</span></div>
+      ${o.customer_name || o.customer_phone ? `<p class="small" style="margin:6px 0 0">👤 ${esc([o.customer_name, o.customer_phone].filter(Boolean).join(" · "))}</p>` : ""}
+      <div class="row small" style="margin-top:4px;align-items:baseline"><span class="muted" style="flex:1">${fmtDate(o.created_at)}</span>${paidPill(o)}<strong>${money(o.total)}</strong></div>
+    </div>`;
+  content().innerHTML = `<div id="mgrOrdersMarker" hidden></div>` + groups.map((g) => {
+    const list = orders.filter((o) => g.match(o.status));
+    return `<h2 class="sec">${g.label} ${list.length ? `<span class="count">${list.length}</span>` : ""}</h2>${list.length ? list.map(row).join("") : `<p class="muted small">None.</p>`}`;
+  }).join("");
+  content().querySelectorAll("[data-id]").forEach((n) => (n.onclick = () => orderDetail(n.dataset.id)));
+}
+
+async function orderDetail(id) {
+  h(`<div class="topbar"><h1>Order</h1><button class="ghost small" id="back">←</button></div><p class="muted">Loading…</p>`);
+  document.getElementById("back").onclick = dashboard;
+  let d;
+  try { d = await api(`/api/admin/orders/${encodeURIComponent(id)}`); } catch (e) { content && (el.innerHTML = `<div class="card"><p class="err">${esc(e.message)}</p></div>`); return; }
+  const { order, customer, allowedNext = [], captains = [] } = d;
+  const items = (order.items || []).map((i) => `<li>${esc(i.name)} × ${i.qty}${i.unit_price ? ` <span class="muted">— ${money(i.qty * i.unit_price)}</span>` : ""}</li>`).join("");
+
+  let controls;
+  if (order.status === "REQUESTED") {
+    controls = `<p class="muted">Awaiting your decision.</p><div class="row"><button id="accept">Accept</button><button id="reject" class="ghost">Reject</button></div><p id="msg"></p>`;
+  } else if (allowedNext.length) {
+    const next = allowedNext[0];
+    let agentField = "";
+    const asg = (state.flow.assignments || []).find((a) => a.at === next);
+    if (asg) {
+      const term = state.brand?.agentTerm || "agent";
+      const isDel = asg.slot === "delivery";
+      const cur = isDel ? order.delivery_captain_name : order.agent_name;
+      if (captains.length) {
+        const opts = `<option value="">Select…</option>` + captains.map((c) => `<option value="${c.id}" data-name="${esc(c.name || "")}" data-phone="${esc(c.phone || "")}" ${cur === c.name ? "selected" : ""}>${esc(c.name || term)}${c.phone ? " · " + esc(c.phone) : ""}</option>`).join("");
+        agentField = `<label>Assign ${esc(term.toLowerCase())}</label><select id="agent">${opts}</select>`;
+      } else {
+        agentField = `<label>Assign ${esc(term.toLowerCase())}</label><p class="muted small">No ${esc(term.toLowerCase())}s yet — add them in the Captains tab.</p><input id="agent" value="${esc(cur || "")}" placeholder="${esc(term)} name" />`;
+      }
+    }
+    controls = `${agentField}<button id="save" data-next="${next}" style="margin-top:12px">Advance to ${next.replace(/_/g, " ")} &amp; notify</button><p id="msg"></p>`;
+  } else {
+    controls = `<p class="muted">${order.status === (state.flow.decision?.reject) ? "Rejected — no further action." : "Complete — no further action."}</p>`;
+  }
+
+  h(`
+    <div class="topbar"><h1>${esc(order.id)}</h1><button class="ghost small" id="back">←</button></div>
+    <div class="card">
+      ${badge(order.status)}
+      <p style="margin:10px 0 2px">👤 ${customer?.wa_phone ? `<a href="tel:${esc(customer.wa_phone)}">${esc(order.customer_name || customer.name || customer.wa_phone)}</a>` : esc(order.customer_name || "—")}</p>
+      ${order.address ? `<p class="muted small" style="margin:4px 0">${esc(order.address)}</p>` : ""}
+      ${order.lat != null ? `<p class="small" style="margin:4px 0"><a href="https://www.google.com/maps?q=${order.lat},${order.lng}" target="_blank" rel="noopener">📍 Navigate</a></p>` : ""}
+      ${order.agent_name ? `<p class="muted small" style="margin:6px 0 0">🔧 ${esc(state.brand?.agentTerm || "Technician")}: ${esc(order.agent_name)}${order.captain_phone ? ` · <a href="tel:${esc(order.captain_phone)}">${esc(order.captain_phone)}</a>` : ""}</p>` : ""}
+      ${order.delivery_captain_name ? `<p class="muted small" style="margin:2px 0 0">🛵 ${esc(order.delivery_captain_name)}${order.delivery_captain_phone ? ` · <a href="tel:${esc(order.delivery_captain_phone)}">${esc(order.delivery_captain_phone)}</a>` : ""}</p>` : ""}
+    </div>
+    <div class="card"><h2 style="margin-top:0">Items</h2><ul>${items || '<li class="muted">No items</li>'}</ul>
+      <div class="row" style="align-items:baseline"><strong style="flex:1">Total</strong><strong style="font-size:17px">${money(order.total)}</strong></div>
+      ${order.payment_status ? `<p class="small" style="margin:8px 0 0">${order.payment_status === "paid" ? "✅ <b>Paid</b>" : "❌ <b>Payment failed</b>"}${order.payment_amount ? " · " + money(order.payment_amount) : ""}${order.payment_payer ? " · " + esc(order.payment_payer) : ""}${order.payment_ref ? ` <span class="muted">(ref ${esc(order.payment_ref)})</span>` : ""}</p>` : `<p class="muted small" style="margin:8px 0 0">Payment: awaiting</p>`}</div>
+    <div class="card"><h2 style="margin-top:0">Action</h2>${controls}</div>
+    <div class="card"><h2 style="margin-top:0">History</h2><ul class="timeline">${(order.events || []).map((e) => `<li>${badge(e.status)} <span class="muted">${fmtDate(e.at)} · ${esc(e.actor)}</span></li>`).join("")}</ul></div>`);
+  document.getElementById("back").onclick = dashboard;
+
+  const patch = async (status, agentName, captainPhone) => {
+    const msg = document.getElementById("msg");
+    try { await api(`/api/admin/orders/${encodeURIComponent(id)}/status`, { method: "PATCH", body: { status, agentName, captainPhone } }); orderDetail(id); }
+    catch (e) { msg.className = "err"; msg.textContent = e.message === "invalid_transition" ? "That change isn't allowed." : e.message; }
+  };
+  const acc = document.getElementById("accept");
+  if (acc) { acc.onclick = () => patch("ACCEPTED"); document.getElementById("reject").onclick = () => { if (confirm("Reject this request? Final.")) patch("REJECTED"); }; }
+  const save = document.getElementById("save");
+  if (save) save.onclick = () => {
+    const elc = document.getElementById("agent"); let agentName = "", captainPhone = "";
+    if (elc) { if (elc.tagName === "SELECT") { const o = elc.selectedOptions[0]; agentName = o?.dataset.name || ""; captainPhone = o?.dataset.phone || ""; } else agentName = elc.value; }
+    patch(save.dataset.next, agentName, captainPhone);
+  };
+}
+
+// ── Tab: Items (catalog) ────────────────────────────────────────────────────
+async function tabItems() {
+  content().innerHTML = `<p class="muted">Loading…</p>`;
+  let catalog = [], categories = [];
+  try {
+    catalog = (await api(`/api/providers/${esc(providerSlug())}`)).catalog || [];
+    categories = (await api(`/api/console/providers/${pid()}/categories`)).categories || [];
+  } catch (e) { content().innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+  const groups = {};
+  catalog.forEach((c) => { const g = c.category || "Uncategorised"; (groups[g] = groups[g] || []).push(c); });
+  const rows = Object.keys(groups).sort().map((g) =>
+    `<div class="pick-cat">${esc(g)}</div>` + groups[g].map((c) =>
+      `<div class="order-line"><div><strong>${esc(c.name)}</strong> <span class="amt">${money(c.price)}</span><br><span class="muted">${esc(c.unit || "")}</span></div>
+       <div class="row grow0" style="gap:6px"><button class="ghost small edit" data-id="${c.id}">Edit</button><button class="ghost small del" data-id="${c.id}" data-name="${esc(c.name)}">✕</button></div></div>`).join("")).join("");
+  content().innerHTML = `<div class="row" style="justify-content:space-between;align-items:center;margin-bottom:10px"><h2 style="margin:0">Items</h2><button class="small grow0" id="add">+ Add item</button></div>${rows || '<p class="muted">No items yet.</p>'}`;
+  document.getElementById("add").onclick = () => itemModal(null, categories, catalog);
+  content().querySelectorAll(".edit").forEach((b) => (b.onclick = () => itemModal(catalog.find((c) => c.id === b.dataset.id), categories, catalog)));
+  content().querySelectorAll(".del").forEach((b) => (b.onclick = async () => { if (!confirm(`Delete "${b.dataset.name}"?`)) return; await api(`/api/console/providers/${pid()}/catalog/${b.dataset.id}`, { method: "DELETE" }); tabItems(); }));
+}
+function itemModal(item, categories, catalog) {
+  const catOpts = categories.map((c) => `<option ${item && item.category === c.name ? "selected" : ""}>${esc(c.name)}</option>`).join("") + `<option value="__new__">+ New category…</option>`;
+  openModal(item ? "Edit item" : "Add item", `
+    <label>Name</label><input id="m_name" value="${item ? esc(item.name) : ""}" />
+    <label style="margin-top:8px">Category</label><select id="m_cat">${catOpts}</select>
+    <input id="m_newcat" style="display:none;margin-top:6px" placeholder="New category name" />
+    <label style="margin-top:8px">Unit</label><select id="m_unit"><option ${item && item.unit === "piece" ? "selected" : ""}>piece</option><option ${item && item.unit === "kg" ? "selected" : ""}>kg</option></select>
+    <label style="margin-top:8px">Price (₹)</label><input id="m_price" type="number" min="0" step="0.01" value="${item ? (item.price / 100) : ""}" />
+    <button id="m_save" style="margin-top:14px">${item ? "Save" : "Add"}</button><p id="m_msg"></p>`);
+  const sel = document.getElementById("m_cat"), ni = document.getElementById("m_newcat");
+  sel.onchange = () => { ni.style.display = sel.value === "__new__" ? "block" : "none"; };
+  document.getElementById("m_save").onclick = async () => {
+    const msg = document.getElementById("m_msg");
+    const category = sel.value === "__new__" ? ni.value.trim() : sel.value;
+    const paise = Math.round((parseFloat(document.getElementById("m_price").value) || 0) * 100);
+    const body = { name: document.getElementById("m_name").value, category, unit: document.getElementById("m_unit").value, price: paise };
+    if (!body.name.trim()) { msg.className = "err"; msg.textContent = "Name required."; return; }
+    try {
+      if (item) await api(`/api/console/providers/${pid()}/catalog/${item.id}`, { method: "PATCH", body });
+      else await api(`/api/console/providers/${pid()}/catalog`, { method: "POST", body });
+      closeModal(); tabItems();
+    } catch (e) { msg.className = "err"; msg.textContent = e.message; }
+  };
+}
+
+// ── Tab: Categories ─────────────────────────────────────────────────────────
+async function tabCategories() {
+  content().innerHTML = `<p class="muted">Loading…</p>`;
+  let categories = [];
+  try { categories = (await api(`/api/console/providers/${pid()}/categories`)).categories || []; } catch (e) { content().innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+  const rows = categories.map((c) => `<div class="order-line"><strong>${esc(c.name)}</strong><button class="ghost small del" data-id="${c.id}" data-name="${esc(c.name)}">✕</button></div>`).join("");
+  content().innerHTML = `<div class="row" style="justify-content:space-between;align-items:center;margin-bottom:10px"><h2 style="margin:0">Categories</h2><button class="small grow0" id="add">+ Add category</button></div>${rows || '<p class="muted">No categories yet.</p>'}`;
+  document.getElementById("add").onclick = () => {
+    openModal("Add category", `<label>Category name</label><input id="m_cat" placeholder="e.g. Wash & Iron" /><button id="m_save" style="margin-top:14px">Add</button><p id="m_msg"></p>`);
+    document.getElementById("m_save").onclick = async () => {
+      const name = document.getElementById("m_cat").value.trim(); if (!name) return;
+      try { await api(`/api/console/providers/${pid()}/categories`, { method: "POST", body: { name } }); closeModal(); tabCategories(); }
+      catch (e) { document.getElementById("m_msg").className = "err"; document.getElementById("m_msg").textContent = e.message; }
+    };
+  };
+  content().querySelectorAll(".del").forEach((b) => (b.onclick = async () => { if (!confirm(`Delete "${b.dataset.name}"? (Items keep their label.)`)) return; await api(`/api/console/providers/${pid()}/categories/${b.dataset.id}`, { method: "DELETE" }); tabCategories(); }));
+}
+
+// ── Tab: Captains ───────────────────────────────────────────────────────────
+async function tabCaptains() {
+  content().innerHTML = `<p class="muted">Loading…</p>`;
+  let captains = [];
+  try { captains = (await api(`/api/console/providers/${pid()}/captains`)).captains || []; } catch (e) { content().innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+  const rows = captains.map((c) => `<div class="order-line"><div><strong>${esc(c.name || "Captain")}</strong><br><span class="muted">${esc(c.phone || "")}</span></div><button class="ghost small del" data-id="${c.id}" data-name="${esc(c.name || "")}">✕</button></div>`).join("");
+  content().innerHTML = `<div class="row" style="justify-content:space-between;align-items:center;margin-bottom:10px"><h2 style="margin:0">Captains</h2><button class="small grow0" id="add">+ Add captain</button></div>${rows || '<p class="muted">No captains yet.</p>'}`;
+  document.getElementById("add").onclick = () => {
+    openModal("Add captain", `<label>Name</label><input id="m_name" /><label style="margin-top:8px">Phone (with country code)</label><input id="m_phone" inputmode="tel" placeholder="e.g. 91 98765 43210" /><button id="m_save" style="margin-top:14px">Add captain</button><p id="m_msg"></p>`);
+    document.getElementById("m_save").onclick = async () => {
+      const name = document.getElementById("m_name").value.trim(), phone = document.getElementById("m_phone").value;
+      const msg = document.getElementById("m_msg");
+      try { await api(`/api/console/providers/${pid()}/captains`, { method: "POST", body: { name, phone } }); closeModal(); tabCaptains(); }
+      catch (e) { msg.className = "err"; msg.textContent = e.message === "invalid" ? "Enter a name and a valid phone with country code." : e.message; }
+    };
+  };
+  content().querySelectorAll(".del").forEach((b) => (b.onclick = async () => { if (!confirm(`Remove captain "${b.dataset.name}"?`)) return; await api(`/api/console/providers/${pid()}/captains/${b.dataset.id}`, { method: "DELETE" }); tabCaptains(); }));
+}
+
+// ── Tab: Managers (admin tier only) ─────────────────────────────────────────
+async function tabManagers() {
+  content().innerHTML = `<p class="muted">Loading…</p>`;
+  let managers = [];
+  try { managers = (await api(`/api/console/providers/${pid()}/managers`)).managers || []; } catch (e) { content().innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+  const rows = managers.map((m) => `<div class="order-line"><div><strong>${esc(m.name || "Manager")}</strong> <span class="tag">${esc(m.tier)}</span><br><span class="muted">${esc(m.phone || "")}</span></div><button class="ghost small del" data-id="${m.id}" data-name="${esc(m.name || "")}">✕</button></div>`).join("");
+  content().innerHTML = `<div class="row" style="justify-content:space-between;align-items:center;margin-bottom:10px"><h2 style="margin:0">Managers</h2><button class="small grow0" id="add">+ Add manager</button></div>
+    <p class="muted small" style="margin-top:-4px">Admins can add/remove managers. Managers can do everything except this tab.</p>${rows || '<p class="muted">No managers yet.</p>'}`;
+  document.getElementById("add").onclick = () => {
+    openModal("Add manager", `
+      <label>Name</label><input id="m_name" />
+      <label style="margin-top:8px">Phone (with country code)</label><input id="m_phone" inputmode="tel" placeholder="e.g. 91 98765 43210" />
+      <label style="margin-top:8px">Role</label><select id="m_tier"><option value="manager">Manager (no Managers tab)</option><option value="admin">Admin (full access)</option></select>
+      <button id="m_save" style="margin-top:14px">Add</button><p id="m_msg"></p>`);
+    document.getElementById("m_save").onclick = async () => {
+      const name = document.getElementById("m_name").value.trim(), phone = document.getElementById("m_phone").value, tier = document.getElementById("m_tier").value;
+      const msg = document.getElementById("m_msg");
+      try { await api(`/api/console/providers/${pid()}/managers`, { method: "POST", body: { name, phone, tier } }); closeModal(); tabManagers(); }
+      catch (e) { msg.className = "err"; msg.textContent = e.message === "invalid" ? "Enter a name and a valid phone with country code." : e.message; }
+    };
+  };
+  content().querySelectorAll(".del").forEach((b) => (b.onclick = async () => { if (!confirm(`Remove manager "${b.dataset.name}"?`)) return; await api(`/api/console/providers/${pid()}/managers/${b.dataset.id}`, { method: "DELETE" }); tabManagers(); }));
+}
+
+// ── Tab: Payment (UPI) — admin tier only ────────────────────────────────────
+async function tabPayment() {
+  content().innerHTML = `<p class="muted">Loading…</p>`;
+  let p = {};
+  try { p = await api(`/api/console/providers/${pid()}/payment`); } catch (e) { content().innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+  content().innerHTML = `
+    <h2 style="margin:0 0 4px">Payment (UPI)</h2>
+    <p class="muted small" style="margin:0 0 12px">Set your UPI ID so technicians can show the customer a payment QR after the job.</p>
+    ${p.upi_id ? `<div class="card" style="margin-bottom:12px"><span class="muted small">Current UPI</span><div><strong>${esc(p.upi_id)}</strong>${p.upi_name ? ` · ${esc(p.upi_name)}` : ""}</div></div>` : ""}
+    <button class="ghost" id="scan" style="margin-bottom:12px">📷 Scan my UPI QR</button>
+    <div id="scanbox"></div>
+    <label>UPI ID (VPA)</label>
+    <input id="upi" value="${esc(p.upi_id || "")}" placeholder="e.g. name@okhdfcbank" autocapitalize="off" autocorrect="off" spellcheck="false" />
+    <label style="margin-top:8px">Payee name (shown in the customer's UPI app)</label>
+    <input id="upiname" value="${esc(p.upi_name || "")}" placeholder="${esc(state.providerName)}" />
+    <button id="save" style="margin-top:14px">Save UPI</button>
+    <p id="msg"></p>`;
+  document.getElementById("scan").onclick = startUpiScan;
+  document.getElementById("save").onclick = async (ev) => {
+    const btn = ev.currentTarget, msg = document.getElementById("msg");
+    msg.textContent = ""; msg.className = "";
+    const upi_id = document.getElementById("upi").value.trim();
+    const upi_name = document.getElementById("upiname").value.trim();
+    btn.disabled = true; btn.textContent = "Saving…";
+    try { await api(`/api/console/providers/${pid()}/payment`, { method: "PATCH", body: { upi_id, upi_name } }); tabPayment(); }
+    catch (e) { msg.className = "err"; msg.textContent = e.message === "invalid_upi" ? "That doesn't look like a UPI ID (e.g. name@okhdfcbank)." : e.message; btn.disabled = false; btn.textContent = "Save UPI"; }
+  };
+}
+
+// Camera scan → extract the VPA (pa=) from the admin's UPI QR.
+async function startUpiScan() {
+  const box = document.getElementById("scanbox");
+  box.innerHTML = `<div class="card"><video id="cam" playsinline muted style="width:100%;border-radius:12px;background:#000"></video><p id="scanmsg" class="muted small">Point the camera at your UPI QR…</p><button class="ghost small" id="scancancel">Cancel</button></div>`;
+  let stream, raf, stopped = false;
+  const stop = () => { stopped = true; if (raf) cancelAnimationFrame(raf); if (stream) stream.getTracks().forEach((t) => t.stop()); box.innerHTML = ""; };
+  document.getElementById("scancancel").onclick = stop;
+  const scanmsg = () => document.getElementById("scanmsg");
+  try { await loadJsQR(); } catch { if (scanmsg()) { scanmsg().className = "err small"; scanmsg().textContent = "Couldn't load the scanner. Enter the UPI ID manually."; } return; }
+  const video = document.getElementById("cam");
+  try { stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } }); }
+  catch { if (scanmsg()) { scanmsg().className = "err small"; scanmsg().textContent = "Camera access denied. Enter the UPI ID manually."; } return; }
+  video.srcObject = stream; try { await video.play(); } catch {}
+  const canvas = document.createElement("canvas");
+  const tick = () => {
+    if (stopped) return;
+    if (video.readyState === video.HAVE_ENOUGH_DATA && video.videoWidth) {
+      canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+      const ctx = canvas.getContext("2d", { willReadFrequently: true });
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const code = window.jsQR(img.data, img.width, img.height, { inversionAttempts: "dontInvert" });
+      if (code) {
+        const vpa = parseUpiVpa(code.data);
+        if (vpa) {
+          document.getElementById("upi").value = vpa;
+          const nm = parseUpiName(code.data);
+          if (nm && !document.getElementById("upiname").value) document.getElementById("upiname").value = nm;
+          stop();
+          const m = document.getElementById("msg"); if (m) { m.className = "ok"; m.textContent = `Scanned ${vpa} — review and tap Save.`; }
+          return;
+        } else if (scanmsg()) { scanmsg().className = "err small"; scanmsg().textContent = "That QR isn't a UPI QR — try your payment QR."; }
+      }
+    }
+    raf = requestAnimationFrame(tick);
+  };
+  raf = requestAnimationFrame(tick);
+}
+function parseUpiVpa(data) { const m = String(data).match(/[?&]pa=([^&]+)/i); return m ? decodeURIComponent(m[1]) : null; }
+function parseUpiName(data) { const m = String(data).match(/[?&]pn=([^&]+)/i); return m ? decodeURIComponent(m[1].replace(/\+/g, " ")) : null; }
+let _jsqrLoading;
+function loadJsQR() {
+  if (window.jsQR) return Promise.resolve();
+  if (_jsqrLoading) return _jsqrLoading;
+  _jsqrLoading = new Promise((res, rej) => { const s = document.createElement("script"); s.src = "/vendor/jsQR.js"; s.onload = () => res(); s.onerror = rej; document.head.appendChild(s); });
+  return _jsqrLoading;
+}
+
+// Provider slug (for the public catalog read used by the Items tab).
+function providerSlug() { const p = state.providers.find((x) => x.id === state.providerId); return p?.slug || ""; }
+
+async function logout() {
+  liveDisconnect();
+  try { await api("/auth/logout", { method: "POST" }); } catch {}
+  state = { phone: "", name: "", providers: [], providerId: null, providerName: "", tier: null, tab: "orders" };
+  screenAuth();
+}
+
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js", { scope: "/manager" }).catch(() => {});
+boot();

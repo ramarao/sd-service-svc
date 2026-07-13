@@ -142,14 +142,16 @@ async function handleWebhook(env, body) {
 
   // Stamp the 24h free-message window and ensure the customer exists.
   const customer = await touchInboundWindow(env.DB, from);
+  // A provider may still own its own number (legacy white-label). In a town the
+  // number is the platform's — no provider matches, and we show the marketplace
+  // chooser instead of going straight to one provider's order form.
   const provider = phoneNumberId
     ? await getProviderByPhoneNumberId(env.DB, phoneNumberId)
     : null;
 
-  if (!provider) return; // inbound to an unmapped number — nothing to reply with
-
-  const host = env.PUBLIC_HOST || "dhobi-demo.manasanta.in";
-  const waCfg = await getWaConfig(env, env.DB, provider);
+  const host = env.PUBLIC_HOST || CONFIG?.brand?.host || "dhobi-demo.manasanta.in";
+  const townName = CONFIG?.brand?.name || provider?.name || "us";
+  const waCfg = await getWaConfig(env, env.DB, provider); // null provider → platform creds
   const text = (msg.text?.body || "").trim();
 
   // Captain login: a captain texts "capt" or "captain" → reply with a one-tap
@@ -170,7 +172,7 @@ async function handleWebhook(env, body) {
         from,
         textPayload(
           `🚫 *You're not a ${lower} yet*\n\n` +
-            `This number isn't registered as a ${lower} for *${provider.name}* or any other provider.\n\n` +
+            `This number isn't registered as a ${lower} for *${townName}* or any provider.\n\n` +
             `👉 Ask your provider to add you as a ${lower} using *this WhatsApp number*, then send *capt* again.`
         )
       );
@@ -192,20 +194,28 @@ async function handleWebhook(env, body) {
         waCfg,
         from,
         textPayload(
-          `🚫 *You're not a manager yet*\n\nThis number isn't registered as a manager for *${provider.name}* or any other provider.\n\n👉 Ask an admin to add you, then send *admin* again.`
+          `🚫 *You're not a manager yet*\n\nThis number isn't registered as a manager for *${townName}* or any provider.\n\n👉 Ask an admin to add you, then send *admin* again.`
         )
       );
     }
     return;
   }
 
-  // Reply with a CTA-URL button that opens the order page inside
-  // WhatsApp's in-app browser, carrying a signed token for this customer's
-  // verified number, so they land already signed in — no login prompt.
-  const t = await mintLinkToken(env, { cid: customer.id, ph: from, slug: provider.slug });
-  const link = `https://${host}/auth/wa/${t}`;
-  const bodyText = `Hi${customer.name ? " " + customer.name : ""}! Tap below to place your ${provider.name} order — you'll be signed in automatically, no login needed.`;
-  await sendWhatsApp(waCfg, from, ctaUrlPayload(bodyText, "Place order", link));
+  // Default (any other message, e.g. "hi") → open a signed-in webview. Legacy
+  // white-label (this number belongs to one provider) goes straight to that
+  // provider's order form; a town number opens the marketplace chooser (/start).
+  const hi = customer.name ? " " + customer.name : "";
+  if (provider) {
+    const t = await mintLinkToken(env, { cid: customer.id, ph: from, slug: provider.slug });
+    const link = `https://${host}/auth/wa/${t}`;
+    const bodyText = `Hi${hi}! Tap below to place your ${provider.name} order — you'll be signed in automatically, no login needed.`;
+    await sendWhatsApp(waCfg, from, ctaUrlPayload(bodyText, "Place order", link));
+  } else {
+    const t = await mintLinkToken(env, { cid: customer.id, ph: from }); // no slug → chooser
+    const link = `https://${host}/auth/wa/${t}`;
+    const bodyText = `Hi${hi}! Welcome to *${townName}*. Tap below to browse services and place an order — you'll be signed in automatically.`;
+    await sendWhatsApp(waCfg, from, ctaUrlPayload(bodyText, "Browse services", link));
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -519,7 +529,9 @@ app.get("/auth/wa/:token", async (c) => {
     wa_phone: claims.ph,
   });
   setCookie(c, COOKIE_NAME, session, sessionCookieOpts);
-  return c.redirect(`/${claims.slug}/app`);
+  // A slug → straight to that provider's order form (white-label); no slug → the
+  // marketplace chooser (town), where the customer picks a vertical then a provider.
+  return c.redirect(claims.slug ? `/${claims.slug}/app` : "/start");
 });
 
 // Who am I (drives client-side dashboard rendering).
