@@ -248,20 +248,42 @@ async function townSettings(id) {
   document.getElementById("back").onclick = () => townDetail(id);
   let s = {};
   try { s = await api(`/api/towns/${id}/settings`); } catch (e) { h(`<div class="card"><p class="err">${esc(e.message)}</p></div>`); return; }
+  const badge = (on) => `<span class="badge ${on ? "ACCEPTED" : "REJECTED"}">${on ? "set" : "unset"}</span>`;
   h(`<div class="topbar"><h1>Settings</h1><button class="ghost small" id="back">←</button></div>
-     <div class="card"><p class="muted small">WhatsApp / maps / payment-email config for this town (secrets shown only as set/unset).</p>
-       <div class="order-line"><span>WhatsApp token</span><span class="badge ${s.token_set ? "ACCEPTED" : "REJECTED"}">${s.token_set ? "set" : "unset"}</span></div>
-       <div class="order-line"><span>App secret</span><span class="badge ${s.app_secret_set ? "ACCEPTED" : "REJECTED"}">${s.app_secret_set ? "set" : "unset"}</span></div>
-       <div class="order-line"><span>Verify token</span><span class="muted">${esc(s.verify_token || "—")}</span></div>
-       <div class="order-line"><span>Maps key</span><span class="badge ${s.maps_set ? "ACCEPTED" : "REJECTED"}">${s.maps_set ? "set" : "unset"}</span></div>
-       <div class="order-line"><span>Groq key</span><span class="badge ${s.groq_set ? "ACCEPTED" : "REJECTED"}">${s.groq_set ? "set" : "unset"}</span></div>
-       <div class="order-line"><span>WA display number</span><span class="muted">${esc(s.wa_display_number || "—")}</span></div>
-       <label style="margin-top:12px">Set WhatsApp display number</label><input id="wadn" value="${esc(s.wa_display_number || "")}" />
-       <button id="save" style="margin-top:10px">Save</button><p id="msg" class="err"></p></div>`);
+     <div class="card"><p class="muted small">WhatsApp / maps / payment-email config for this town. Secret fields: leave blank to keep the current value; type to replace.</p>
+
+       <label style="margin-top:6px">WhatsApp access token ${badge(s.token_set)}</label>
+       <input id="wa_token" type="password" placeholder="${s.token_set ? "•••• set — blank keeps it" : "Meta permanent access token"}" />
+
+       <label style="margin-top:8px">App secret ${badge(s.app_secret_set)}</label>
+       <input id="wa_app_secret" type="password" placeholder="${s.app_secret_set ? "•••• set — blank keeps it" : "Meta app secret (verifies webhook)"}" />
+
+       <label style="margin-top:8px">Verify token</label>
+       <input id="wa_verify_token" value="${esc(s.verify_token || "")}" placeholder="you choose this; also paste into Meta" />
+
+       <label style="margin-top:8px">WhatsApp display number (E.164 digits)</label>
+       <input id="wa_display_number" value="${esc(s.wa_display_number || "")}" placeholder="e.g. 919999900000" />
+
+       <label style="margin-top:8px">Ola Maps key ${badge(s.maps_set)}</label>
+       <input id="ola_maps_api_key" type="password" placeholder="${s.maps_set ? "•••• set — blank keeps it" : "address autocomplete (optional)"}" />
+
+       <label style="margin-top:8px">Groq key ${badge(s.groq_set)}</label>
+       <input id="groq_api_key" type="password" placeholder="${s.groq_set ? "•••• set — blank keeps it" : "payment-email parsing (optional)"}" />
+
+       <button id="save" style="margin-top:14px">Save</button><p id="msg"></p>
+       <p class="muted small" style="margin-top:10px">Webhook URL for Meta: <code>https://${esc((s.host || "").replace(/^https?:\/\//, "")) || "&lt;this town&gt;"}/webhook/whatsapp</code></p>
+     </div>`);
   document.getElementById("back").onclick = () => townDetail(id);
   document.getElementById("save").onclick = async () => {
-    const msg = document.getElementById("msg"); msg.textContent = "";
-    try { await api(`/api/towns/${id}/settings`, { method: "POST", body: { wa_display_number: v("wadn") } }); msg.className = ""; msg.textContent = "Saved ✓"; }
+    const msg = document.getElementById("msg"); msg.className = ""; msg.textContent = "Saving…";
+    // Only send non-empty fields so blank inputs never wipe existing secrets.
+    const body = {};
+    for (const k of ["wa_token", "wa_app_secret", "wa_verify_token", "wa_display_number", "ola_maps_api_key", "groq_api_key"]) {
+      const val = v(k);
+      if (val) body[k] = val;
+    }
+    body.wa_display_number = v("wa_display_number"); // always send (may be cleared)
+    try { await api(`/api/towns/${id}/settings`, { method: "POST", body }); msg.className = "small"; msg.textContent = "Saved ✓"; }
     catch (e) { msg.className = "err"; msg.textContent = e.message; }
   };
 }
