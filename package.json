@@ -5,12 +5,14 @@
   "description": "Multi-provider on-site service platform (pickup \u2192 service \u2192 deliver) on Cloudflare Workers with WhatsApp Business API",
   "type": "module",
   "scripts": {
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
-    "db:local": "wrangler d1 execute sd-service-db --local --file=./schema.sql",
-    "db:remote": "wrangler d1 execute sd-service-db --remote --file=./schema.sql",
-    "seed:local": "wrangler d1 execute sd-service-db --local --file=./seed.sql",
-    "tail": "wrangler tail",
+    "dev": "wrangler dev -c apps/dhobi/wrangler.jsonc",
+    "dev:dhobi": "wrangler dev -c apps/dhobi/wrangler.jsonc",
+    "deploy": "wrangler deploy -c apps/dhobi/wrangler.jsonc",
+    "deploy:dhobi": "wrangler deploy -c apps/dhobi/wrangler.jsonc",
+    "db:local": "wrangler d1 execute sd-service-db --local -c apps/dhobi/wrangler.jsonc --file=./apps/dhobi/schema.sql",
+    "db:remote": "wrangler d1 execute sd-service-db --remote -c apps/dhobi/wrangler.jsonc --file=./apps/dhobi/schema.sql",
+    "seed:local": "wrangler d1 execute sd-service-db --local -c apps/dhobi/wrangler.jsonc --file=./apps/dhobi/seed.sql",
+    "tail": "wrangler tail -c apps/dhobi/wrangler.jsonc",
     "setup:email": "node scripts/setup-email-routing.mjs"
   },
   "dependencies": {
