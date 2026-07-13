@@ -85,8 +85,7 @@ export function formatMoney(paise, cur = "INR") {
   return sym + (Number(paise || 0) / 100).toLocaleString("en-IN", { minimumFractionDigits: 0, maximumFractionDigits: 2 });
 }
 
-export async function notifyCustomer(waCfg, { config, provider, customer, status, order }) {
-  const flow = config?.flow;
+export async function notifyCustomer(waCfg, { flow, provider, customer, status, order }) {
   const cfg = safeConfig(provider.config);
   const label = cfg.statusLabels?.[status] || flow?.labels?.[status] || status;
   const amount = order.total ? `\nAmount: ${formatMoney(order.total, cfg.currency)}` : "";
@@ -95,7 +94,7 @@ export async function notifyCustomer(waCfg, { config, provider, customer, status
   const asg = flow ? assignmentAt(flow, status) : null;
   const capName = asg?.slot === "delivery" ? order.delivery_captain_name : asg?.slot === "primary" ? order.agent_name : null;
   const capPhone = asg?.slot === "delivery" ? order.delivery_captain_phone : asg?.slot === "primary" ? order.captain_phone : null;
-  const agentTerm = config?.brand?.agentTerm || "Captain";
+  const agentTerm = flow?.agentTerm || "Captain";
   const captain = capName ? `\n${agentTerm}: ${capName}${capPhone ? ` (+${capPhone})` : ""}` : "";
   const freeText = `${label}\nOrder ${order.id}${amount}${captain}`;
 

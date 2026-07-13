@@ -4,6 +4,7 @@
 import { randomId } from "./crypto.js";
 import { notifyCustomer } from "./wa.js";
 import { canTransition, notifyStatuses, assignmentAt, advanceStep } from "./flow.js";
+import { flowForProvider } from "./flows/index.js";
 
 export function now() {
   return Date.now();
@@ -63,6 +64,29 @@ export async function getProviderByPhoneNumberId(db, pnid) {
     .prepare("SELECT * FROM service_providers WHERE wa_phone_number_id = ?")
     .bind(pnid)
     .first();
+}
+
+// ── Verticals (town-enabled service categories; slug == flow registry key) ────
+export async function listVerticals(db) {
+  try {
+    const { results } = await db
+      .prepare("SELECT slug, name, emoji, sort FROM verticals WHERE active = 1 ORDER BY sort, name")
+      .all();
+    return results || [];
+  } catch {
+    return []; // table absent (single-vertical legacy D1)
+  }
+}
+export async function listProvidersByVertical(db, slug) {
+  try {
+    const { results } = await db
+      .prepare("SELECT id, slug, name FROM service_providers WHERE vertical = ? ORDER BY name")
+      .bind(slug)
+      .all();
+    return results || [];
+  } catch {
+    return []; // vertical column absent (legacy D1)
+  }
 }
 
 // ── Customers ────────────────────────────────────────────────────────────────
@@ -363,12 +387,13 @@ export async function getOrder(db, id) {
   return { ...order, items, events, total };
 }
 
-// Advance/transition status, write an event, and notify the customer. Driven by
-// the app's `config` (config.flow). Returns { order } or throws Error.
-export async function transitionOrder(env, db, { config, orderId, toStatus, actor, agentName, captainPhone }) {
-  const flow = config.flow;
+// Advance/transition status, write an event, and notify the customer. The flow
+// is resolved from the order's provider → its vertical. Returns { order } or throws.
+export async function transitionOrder(env, db, { orderId, toStatus, actor, agentName, captainPhone }) {
   const order = await db.prepare("SELECT * FROM orders WHERE id = ?").bind(orderId).first();
   if (!order) throw new Error("not_found");
+  const provider = await getProvider(db, order.provider_id);
+  const flow = flowForProvider(provider);
 
   if (!canTransition(flow, order.status, toStatus)) throw new Error("invalid_transition");
 
@@ -397,12 +422,11 @@ export async function transitionOrder(env, db, { config, orderId, toStatus, acto
 
   const full = await getOrder(db, orderId); // includes items + total
   if (notifyStatuses(flow).has(toStatus)) {
-    const provider = await getProvider(db, order.provider_id);
     const customer = await getCustomer(db, order.customer_id);
     if (provider && customer) {
       const waCfg = await getWaConfig(env, db, provider);
       // Fire-and-log; a WhatsApp failure must not roll back the status change.
-      await notifyCustomer(waCfg, { config, provider, customer, status: toStatus, order: full }).catch((e) =>
+      await notifyCustomer(waCfg, { flow, provider, customer, status: toStatus, order: full }).catch((e) =>
         console.error("[notify] failed", e)
       );
     }

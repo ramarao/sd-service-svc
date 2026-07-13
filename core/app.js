@@ -12,6 +12,7 @@ import QRCode from "qrcode";
 import { processPaymentEmail } from "./email.js";
 import { notifyOrders } from "./orders-hub.js";
 import { allowedTransitions, advanceStep, itemsEditableAt } from "./flow.js";
+import { FLOWS, flowForProvider, flowForVertical, setDefaultVertical } from "./flows/index.js";
 
 import { randomId, randomOtp, sha256Hex, hashPassword, verifyPassword } from "./crypto.js";
 import {
@@ -64,6 +65,8 @@ import {
   getManagerProviders,
   getManagerFor,
   managerName,
+  listVerticals,
+  listProvidersByVertical,
 } from "./db.js";
 import { olaSuggest, olaReverse, olaConfigured } from "./ola.js";
 
@@ -73,17 +76,19 @@ const OTP_TTL_MS = 5 * 60 * 1000;
 // The active vertical's config, injected once by createApp() at Worker init.
 let CONFIG = null;
 
-// Build (well, configure) the app for one vertical and return it. Each Worker
-// calls this once with its own config.js.
+// Build (well, configure) the app for one town and return it. Each Worker calls
+// this once with its own config.js (town brand + defaultVertical). The order flow
+// is NOT fixed per Worker — it's resolved per request from the provider's vertical.
 export function createApp(config) {
   CONFIG = config;
+  setDefaultVertical(config.defaultVertical); // fallback for providers with no vertical
   return app;
 }
 
-// Make config + flow available to every request handler.
+// Make the town config available to every request handler. (Flow is per-provider,
+// resolved in each handler via flowForProvider(provider) — not global.)
 app.use("*", (c, next) => {
   c.set("config", CONFIG);
-  c.set("flow", CONFIG.flow);
   return next();
 });
 
@@ -365,7 +370,8 @@ app.get("/api/captain/orders", requireRole("captain"), async (c) => {
   const providers = await getCaptainProviders(c.env.DB, sess.phone);
   const provider = providers.find((p) => p.id === providerId);
   if (!provider) return c.json({ error: "forbidden" }, 403);
-  const jobs = await listCaptainJobs(c.env.DB, c.get("flow"), sess.phone, provider.id);
+  const flow = flowForProvider(await getProvider(c.env.DB, provider.id));
+  const jobs = await listCaptainJobs(c.env.DB, flow, sess.phone, provider.id);
   return c.json({ provider, jobs });
 });
 
@@ -390,7 +396,7 @@ app.get("/api/captain/orders/:id", requireRole("captain"), async (c) => {
     .bind(order.provider_id)
     .all();
   // The primary (pickup) agent may edit items only while the flow allows it.
-  const flow = c.get("flow");
+  const flow = flowForProvider(await getProvider(c.env.DB, order.provider_id));
   const editable = itemsEditableAt(flow, order.status) && order.captain_phone === sess.phone;
   // The advance action, if this agent owns the slot that advances this status.
   const step = advanceStep(flow, order.status);
@@ -409,7 +415,8 @@ app.patch("/api/captain/orders/:id/items", requireRole("captain"), async (c) => 
   const { items } = await c.req.json().catch(() => ({}));
   const order = await c.env.DB.prepare("SELECT * FROM orders WHERE id = ?").bind(c.req.param("id")).first();
   if (!order) return c.json({ error: "not_found" }, 404);
-  if (order.captain_phone !== sess.phone || !itemsEditableAt(c.get("flow"), order.status)) {
+  const flow = flowForProvider(await getProvider(c.env.DB, order.provider_id));
+  if (order.captain_phone !== sess.phone || !itemsEditableAt(flow, order.status)) {
     return c.json({ error: "locked" }, 403); // not the primary agent, or items no longer editable
   }
   if (!Array.isArray(items)) return c.json({ error: "no_items" }, 400);
@@ -423,16 +430,16 @@ app.patch("/api/captain/orders/:id/items", requireRole("captain"), async (c) => 
 // must be exactly the flow's next step from here.
 app.post("/api/captain/orders/:id/advance", requireRole("captain"), async (c) => {
   const sess = c.get("session");
-  const flow = c.get("flow");
   const { to } = await c.req.json().catch(() => ({}));
   const order = await c.env.DB.prepare("SELECT * FROM orders WHERE id = ?").bind(c.req.param("id")).first();
   if (!order) return c.json({ error: "not_found" }, 404);
+  const flow = flowForProvider(await getProvider(c.env.DB, order.provider_id));
   const step = advanceStep(flow, order.status);
   if (!step || step.to !== to) return c.json({ error: "invalid_transition" }, 400);
   const ownerPhone = step.slot === "delivery" ? order.delivery_captain_phone : order.captain_phone;
   if (ownerPhone !== sess.phone) return c.json({ error: "forbidden" }, 403);
   try {
-    const updated = await transitionOrder(c.env, c.env.DB, { config: c.get("config"), orderId: order.id, toStatus: step.to, actor: "captain" });
+    const updated = await transitionOrder(c.env, c.env.DB, { orderId: order.id, toStatus: step.to, actor: "captain" });
     await notifyOrders(c.env, order.provider_id);
     return c.json({ ok: true, order: updated, paymentDue: step.to === flow.paymentAfter });
   } catch (e) {
@@ -540,8 +547,10 @@ app.get("/api/providers/:slug", async (c) => {
     id: provider.id,
     slug: provider.slug,
     name: provider.name,
+    vertical: provider.vertical || null,
     currency: cfg.currency || "INR",
     catalog,
+    flow: flowForProvider(provider), // the vertical's flow — drives status labels/tracking
   });
 });
 
@@ -780,7 +789,8 @@ app.get("/api/admin/orders/:id", requireRole("admin", "super_admin", "manager"),
   // enrich with customer contact, valid next statuses, and the provider's captains
   const customer = await getCustomer(c.env.DB, order.customer_id);
   const captains = await listCaptains(c.env.DB, order.provider_id);
-  return c.json({ order, customer, allowedNext: allowedTransitions(c.get("flow"), order.status), captains });
+  const flow = flowForProvider(await getProvider(c.env.DB, order.provider_id));
+  return c.json({ order, customer, allowedNext: allowedTransitions(flow, order.status), captains, flow });
 });
 
 // Advance status / assign captain → fires the WhatsApp notification.
@@ -795,7 +805,6 @@ app.patch("/api/admin/orders/:id/status", requireRole("admin", "super_admin", "m
 
   try {
     const updated = await transitionOrder(c.env, c.env.DB, {
-      config: c.get("config"),
       orderId: order.id,
       toStatus: status,
       actor: sess.role,
@@ -857,16 +866,39 @@ app.patch("/api/console/providers/:id/payment", requireRole("super_admin", "mana
   return c.json({ ok: true });
 });
 
-app.get("/api/admin/meta", requireRole("admin", "super_admin", "manager"), (c) => {
-  const flow = c.get("flow");
+// Status flow for the admin UI — per provider (?provider=<id>), falling back to
+// the town's default vertical when none is given.
+app.get("/api/admin/meta", requireRole("admin", "super_admin", "manager"), async (c) => {
+  const pid = c.req.query("provider");
+  const provider = pid ? await getProvider(c.env.DB, pid) : null;
+  const flow = flowForProvider(provider);
   return c.json({ statusFlow: flow.statuses, terminal: flow.terminal });
 });
 
-// The vertical's shape + branding — drives the SPAs' terminology, status labels,
-// and field-agent action buttons. Public (not sensitive): just the flow config.
+// Town config for the SPAs: brand + the default vertical's flow (single-vertical
+// apps use this; the marketplace SPA fetches flow per provider via /api/flow).
 app.get("/api/config", (c) => {
   const cfg = c.get("config");
-  return c.json({ brand: cfg.brand, flow: cfg.flow });
+  return c.json({ brand: cfg.brand, defaultVertical: cfg.defaultVertical || null, flow: flowForVertical(cfg.defaultVertical) });
+});
+
+// The town's active verticals — for the customer "pick a service" chooser. Public.
+app.get("/api/verticals", async (c) => {
+  return c.json({ verticals: await listVerticals(c.env.DB) });
+});
+
+// Providers within a vertical — for the chooser's second step. Public.
+app.get("/api/verticals/:slug/providers", async (c) => {
+  return c.json({ providers: await listProvidersByVertical(c.env.DB, c.req.param("slug")) });
+});
+
+// The resolved flow for a given provider (id or slug) — used by the captain/manager
+// SPAs, which can span verticals, after they pick/select a provider.
+app.get("/api/flow", async (c) => {
+  const key = c.req.query("provider");
+  if (!key) return c.json({ error: "missing_provider" }, 400);
+  const provider = (await getProvider(c.env.DB, key)) || (await getProviderBySlug(c.env.DB, key));
+  return c.json({ flow: flowForProvider(provider), vertical: provider?.vertical || null });
 });
 
 // Test the payment-email → Groq → order matching without email routing. Paste a
