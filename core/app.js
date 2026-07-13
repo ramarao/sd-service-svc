@@ -1207,6 +1207,56 @@ app.post("/api/control/providers/:id/catalog", requireControlToken, async (c) =>
   await ensureCategory(c.env.DB, c.req.param("id"), category);
   return c.json({ ok: true, id });
 });
+app.delete("/api/control/providers/:id/catalog/:itemId", requireControlToken, async (c) => {
+  await c.env.DB.prepare("DELETE FROM catalog_items WHERE id = ? AND provider_id = ?").bind(c.req.param("itemId"), c.req.param("id")).run();
+  return c.json({ ok: true });
+});
+
+// Delete a provider (and its catalog/categories/captains/managers).
+app.delete("/api/control/providers/:id", requireControlToken, async (c) => {
+  const pid = c.req.param("id");
+  await c.env.DB.batch([
+    c.env.DB.prepare("DELETE FROM catalog_items WHERE provider_id = ?").bind(pid),
+    c.env.DB.prepare("DELETE FROM provider_categories WHERE provider_id = ?").bind(pid),
+    c.env.DB.prepare("DELETE FROM captains WHERE provider_id = ?").bind(pid),
+    c.env.DB.prepare("DELETE FROM managers WHERE provider_id = ?").bind(pid),
+    c.env.DB.prepare("DELETE FROM service_providers WHERE id = ?").bind(pid),
+  ]);
+  return c.json({ ok: true });
+});
+
+// Managers per provider (admin / manager tier) — the phone numbers that log into
+// the town's /manager PWA over WhatsApp.
+app.get("/api/control/providers/:id/managers", requireControlToken, async (c) => {
+  return c.json({ managers: await listManagers(c.env.DB, c.req.param("id")) });
+});
+app.post("/api/control/providers/:id/managers", requireControlToken, async (c) => {
+  const { name, phone, tier } = await c.req.json().catch(() => ({}));
+  const digits = String(phone || "").replace(/[^\d]/g, "");
+  if (!name?.trim() || digits.length < 10) return c.json({ error: "invalid", need: "name + phone (>=10 digits)" }, 400);
+  const id = await createManager(c.env.DB, { providerId: c.req.param("id"), name: name.trim(), phone: digits, tier });
+  return c.json({ ok: true, id });
+});
+app.delete("/api/control/providers/:id/managers/:mgrId", requireControlToken, async (c) => {
+  await deleteManager(c.env.DB, c.req.param("mgrId"), c.req.param("id"));
+  return c.json({ ok: true });
+});
+
+// Captains (field agents) per provider.
+app.get("/api/control/providers/:id/captains", requireControlToken, async (c) => {
+  return c.json({ captains: await listCaptains(c.env.DB, c.req.param("id")) });
+});
+app.post("/api/control/providers/:id/captains", requireControlToken, async (c) => {
+  const { name, phone } = await c.req.json().catch(() => ({}));
+  const digits = String(phone || "").replace(/[^\d]/g, "");
+  if (!name?.trim() || digits.length < 10) return c.json({ error: "invalid", need: "name + phone (>=10 digits)" }, 400);
+  const id = await createCaptain(c.env.DB, { providerId: c.req.param("id"), name: name.trim(), phone: digits });
+  return c.json({ ok: true, id });
+});
+app.delete("/api/control/providers/:id/captains/:capId", requireControlToken, async (c) => {
+  await deleteCaptain(c.env.DB, c.req.param("capId"), c.req.param("id"));
+  return c.json({ ok: true });
+});
 
 // Settings (WhatsApp / Ola / Groq / display number). Secret fields only overwrite
 // when a non-empty value is supplied.

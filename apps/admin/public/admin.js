@@ -196,7 +196,7 @@ async function townDetail(id) {
 
     <div class="card">
       <div class="row" style="align-items:baseline"><h2 style="margin:0;flex:1">Providers</h2><button class="ghost small grow0" id="addp">+ Provider</button></div>
-      ${(provs.providers || []).map((p) => `<div class="order-line"><div><strong>${esc(p.name)}</strong> <span class="muted">${esc(p.vertical || "—")}</span><br><span class="muted small">${esc(p.slug)}${p.upi_id ? " · " + esc(p.upi_id) : ""}</span></div></div>`).join("") || '<p class="muted small">None.</p>'}
+      ${(provs.providers || []).map((p) => `<div class="order-line tap" data-pid="${esc(p.id)}"><div><strong>${esc(p.name)}</strong> <span class="muted">${esc(p.vertical || "—")}</span><br><span class="muted small">${esc(p.slug)}${p.upi_id ? " · " + esc(p.upi_id) : ""}</span></div><span class="chev">›</span></div>`).join("") || '<p class="muted small">None.</p>'}
     </div>
 
     <div class="card"><button class="ghost small" id="settings">⚙️ Settings</button> <button class="ghost small" id="del">Remove town</button></div>`);
@@ -205,6 +205,92 @@ async function townDetail(id) {
   document.getElementById("addp").onclick = () => addProvider(id);
   document.getElementById("settings").onclick = () => townSettings(id);
   document.getElementById("del").onclick = async () => { if (confirm("Remove this town from the registry? (The town Worker itself keeps running.)")) { await api(`/api/towns/${id}`, { method: "DELETE" }); townsList(); } };
+  el.querySelectorAll("[data-pid]").forEach((n) => (n.onclick = () => providerDetail(id, (provs.providers || []).find((p) => p.id === n.dataset.pid))));
+}
+
+// Provider detail — edit/delete, managers (admin numbers), captains, catalog.
+async function providerDetail(townId, p) {
+  const pid = p.id;
+  const A = (path) => `/api/towns/${townId}/providers/${pid}${path}`;
+  h(`<div class="topbar"><h1>${esc(p.name)}</h1><button class="ghost small" id="back">←</button></div><div id="body"><p class="muted">Loading…</p></div>`);
+  document.getElementById("back").onclick = () => townDetail(townId);
+  const [mgrs, caps, cat, verts] = await Promise.all([
+    api(A("/managers")).catch(() => ({ managers: [] })),
+    api(A("/captains")).catch(() => ({ captains: [] })),
+    api(A("/catalog")).catch(() => ({ catalog: [] })),
+    api(`/api/towns/${townId}/verticals`).catch(() => ({ verticals: [] })),
+  ]);
+  const list = (rows, render, empty) => rows.length ? rows.map(render).join("") : `<p class="muted small">${empty}</p>`;
+  document.getElementById("body").innerHTML = `
+    <div class="card">
+      <label>Name</label><input id="p_name" value="${esc(p.name)}" />
+      <label style="margin-top:8px">Vertical</label>
+      <select id="p_vertical">${(verts.verticals || []).map((x) => `<option value="${esc(x.slug)}" ${x.slug === p.vertical ? "selected" : ""}>${esc(x.name)}</option>`).join("") || `<option value="${esc(p.vertical || "")}">${esc(p.vertical || "—")}</option>`}</select>
+      <label style="margin-top:8px">UPI ID</label><input id="p_upi" value="${esc(p.upi_id || "")}" placeholder="shop@upi" />
+      <div class="row" style="margin-top:12px;gap:8px"><button class="grow0" id="psave">Save</button><button class="ghost grow0" id="pdel">Delete provider</button></div>
+      <p id="pmsg"></p>
+    </div>
+
+    <div class="card">
+      <div class="row" style="align-items:baseline"><h2 style="margin:0;flex:1">Managers (admin numbers)</h2></div>
+      <p class="muted small" style="margin:0 0 8px">These phone numbers log into <code>${esc((p.slug))}</code>'s town at <b>/manager</b> over WhatsApp (text <b>admin</b> or <b>manager</b>).</p>
+      ${list(mgrs.managers || [], (m) => `<div class="order-line"><div><strong>${esc(m.name || "—")}</strong> <span class="badge ${m.tier === "admin" ? "ACCEPTED" : "ASSIGNED"}">${esc(m.tier)}</span><br><span class="muted small">${esc(m.phone)}</span></div><button class="ghost small delm" data-mid="${esc(m.id)}" data-name="${esc(m.name || "")}">✕</button></div>`, "No managers yet.")}
+      <div class="row" style="gap:6px;margin-top:10px;align-items:flex-end">
+        <div style="flex:1"><label>Name</label><input id="m_name" placeholder="Owner" /></div>
+        <div style="flex:1"><label>Phone (with country code)</label><input id="m_phone" inputmode="tel" placeholder="9198…" /></div>
+        <div><label>Tier</label><select id="m_tier"><option value="admin">admin</option><option value="manager">manager</option></select></div>
+        <button class="grow0" id="maddbtn">Add</button>
+      </div><p id="mmsg" class="err small"></p>
+    </div>
+
+    <div class="card">
+      <h2 style="margin-top:0">Captains (field agents)</h2>
+      ${list(caps.captains || [], (x) => `<div class="order-line"><div><strong>${esc(x.name || "—")}</strong><br><span class="muted small">${esc(x.phone || "")}</span></div><button class="ghost small delc" data-cid="${esc(x.id)}" data-name="${esc(x.name || "")}">✕</button></div>`, "No captains yet.")}
+      <div class="row" style="gap:6px;margin-top:10px;align-items:flex-end">
+        <div style="flex:1"><label>Name</label><input id="c_name" placeholder="Ravi" /></div>
+        <div style="flex:1"><label>Phone</label><input id="c_phone" inputmode="tel" placeholder="9198…" /></div>
+        <button class="grow0" id="caddbtn">Add</button>
+      </div><p id="cmsg" class="err small"></p>
+    </div>
+
+    <div class="card">
+      <h2 style="margin-top:0">Catalog</h2>
+      ${list(cat.catalog || [], (i) => `<div class="order-line"><div><strong>${esc(i.name)}</strong> <span class="muted small">${esc(i.category || "")}</span><br><span class="muted small">${money(i.price)} · ${esc(i.unit || "piece")}</span></div><button class="ghost small deli" data-iid="${esc(i.id)}" data-name="${esc(i.name)}">✕</button></div>`, "No items yet — customers can't order without these.")}
+      <div class="row" style="gap:6px;margin-top:10px;align-items:flex-end">
+        <div style="flex:1"><label>Item</label><input id="i_name" placeholder="Shirt" /></div>
+        <div style="flex:1"><label>Category</label><input id="i_cat" placeholder="Wash & Iron" /></div>
+        <div><label>Price (₹)</label><input id="i_price" inputmode="numeric" placeholder="20" style="width:90px" /></div>
+        <button class="grow0" id="iaddbtn">Add</button>
+      </div><p id="imsg" class="err small"></p>
+    </div>`;
+
+  document.getElementById("psave").onclick = async () => {
+    const msg = document.getElementById("pmsg");
+    try { await api(A(""), { method: "PATCH", body: { name: v("p_name"), vertical: v("p_vertical"), upi_id: v("p_upi") } }); msg.className = "small"; msg.textContent = "Saved ✓"; }
+    catch (e) { msg.className = "err"; msg.textContent = e.message; }
+  };
+  document.getElementById("pdel").onclick = async () => {
+    if (!confirm(`Delete "${p.name}" and all its catalog/managers/captains? This cannot be undone.`)) return;
+    await api(A(""), { method: "DELETE" }); townDetail(townId);
+  };
+  document.getElementById("maddbtn").onclick = async () => {
+    const msg = document.getElementById("mmsg"); msg.textContent = "";
+    try { await api(A("/managers"), { method: "POST", body: { name: v("m_name"), phone: v("m_phone"), tier: document.getElementById("m_tier").value } }); providerDetail(townId, p); }
+    catch (e) { msg.textContent = e.data?.need || e.message; }
+  };
+  document.getElementById("caddbtn").onclick = async () => {
+    const msg = document.getElementById("cmsg"); msg.textContent = "";
+    try { await api(A("/captains"), { method: "POST", body: { name: v("c_name"), phone: v("c_phone") } }); providerDetail(townId, p); }
+    catch (e) { msg.textContent = e.data?.need || e.message; }
+  };
+  document.getElementById("iaddbtn").onclick = async () => {
+    const msg = document.getElementById("imsg"); msg.textContent = "";
+    try { await api(A("/catalog"), { method: "POST", body: { name: v("i_name"), category: v("i_cat"), price: (parseInt(v("i_price"), 10) || 0) * 100 } }); providerDetail(townId, p); }
+    catch (e) { msg.textContent = e.message; }
+  };
+  el.querySelectorAll(".delm").forEach((b) => (b.onclick = async () => { if (confirm(`Remove manager "${b.dataset.name}"?`)) { await api(A(`/managers/${b.dataset.mid}`), { method: "DELETE" }); providerDetail(townId, p); } }));
+  el.querySelectorAll(".delc").forEach((b) => (b.onclick = async () => { if (confirm(`Remove captain "${b.dataset.name}"?`)) { await api(A(`/captains/${b.dataset.cid}`), { method: "DELETE" }); providerDetail(townId, p); } }));
+  el.querySelectorAll(".deli").forEach((b) => (b.onclick = async () => { if (confirm(`Delete item "${b.dataset.name}"?`)) { await api(A(`/catalog/${b.dataset.iid}`), { method: "DELETE" }); providerDetail(townId, p); } }));
 }
 
 async function addVertical(id) {

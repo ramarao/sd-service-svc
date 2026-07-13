@@ -123,12 +123,29 @@ app.get("/api/towns/:id/providers", requireRole("super_admin"), towned("provider
 app.post("/api/towns/:id/providers", requireRole("super_admin"), towned("providers"));
 app.get("/api/towns/:id/settings", requireRole("super_admin"), towned("settings"));
 app.post("/api/towns/:id/settings", requireRole("super_admin"), towned("settings"));
-app.get("/api/towns/:id/providers/:rest/catalog", requireRole("super_admin"), async (c) => {
+// Generic proxy into a town's control API for any control path, forwarding method + body.
+async function proxyTown(c, controlPath) {
   const town = await getTown(c.env.DB, c.req.param("id"));
   if (!town) return c.json({ error: "town_not_found" }, 404);
-  const r = await callTown(town, `/api/control/providers/${c.req.param("rest")}/catalog`);
+  const body = ["POST", "PATCH", "PUT"].includes(c.req.method) ? await c.req.json().catch(() => ({})) : undefined;
+  const r = await callTown(town, controlPath, c.req.method, body);
   return c.json(r.data, r.status);
-});
+}
+const P = (c) => c.req.param("pid");
+// Edit / delete a provider.
+app.patch("/api/towns/:id/providers/:pid", requireRole("super_admin"), (c) => proxyTown(c, `/api/control/providers/${P(c)}`));
+app.delete("/api/towns/:id/providers/:pid", requireRole("super_admin"), (c) => proxyTown(c, `/api/control/providers/${P(c)}`));
+// Catalog.
+app.get("/api/towns/:id/providers/:pid/catalog", requireRole("super_admin"), (c) => proxyTown(c, `/api/control/providers/${P(c)}/catalog`));
+app.post("/api/towns/:id/providers/:pid/catalog", requireRole("super_admin"), (c) => proxyTown(c, `/api/control/providers/${P(c)}/catalog`));
+app.delete("/api/towns/:id/providers/:pid/catalog/:itemId", requireRole("super_admin"), (c) => proxyTown(c, `/api/control/providers/${P(c)}/catalog/${c.req.param("itemId")}`));
+// Managers (admin numbers) + captains (field agents).
+app.get("/api/towns/:id/providers/:pid/managers", requireRole("super_admin"), (c) => proxyTown(c, `/api/control/providers/${P(c)}/managers`));
+app.post("/api/towns/:id/providers/:pid/managers", requireRole("super_admin"), (c) => proxyTown(c, `/api/control/providers/${P(c)}/managers`));
+app.delete("/api/towns/:id/providers/:pid/managers/:mid", requireRole("super_admin"), (c) => proxyTown(c, `/api/control/providers/${P(c)}/managers/${c.req.param("mid")}`));
+app.get("/api/towns/:id/providers/:pid/captains", requireRole("super_admin"), (c) => proxyTown(c, `/api/control/providers/${P(c)}/captains`));
+app.post("/api/towns/:id/providers/:pid/captains", requireRole("super_admin"), (c) => proxyTown(c, `/api/control/providers/${P(c)}/captains`));
+app.delete("/api/towns/:id/providers/:pid/captains/:cid", requireRole("super_admin"), (c) => proxyTown(c, `/api/control/providers/${P(c)}/captains/${c.req.param("cid")}`));
 
 // ── Deploy targets (Cloudflare accounts + tokens) ─────────────────────────────
 app.get("/api/targets", requireRole("super_admin"), async (c) => {
