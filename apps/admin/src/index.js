@@ -41,6 +41,18 @@ app.get("/api/me", async (c) => {
   return c.json(sess ? { authenticated: true, ...sess } : { authenticated: false });
 });
 
+// Change the signed-in super-admin's own password (verifies the current one).
+app.post("/api/account/password", requireRole("super_admin"), async (c) => {
+  const sess = c.get("session");
+  const { current, next } = await c.req.json().catch(() => ({}));
+  if (!current || !next) return c.json({ error: "missing" }, 400);
+  if (String(next).length < 8) return c.json({ error: "too_short", detail: "at least 8 characters" }, 400);
+  const user = await c.env.DB.prepare("SELECT * FROM admin_users WHERE id = ?").bind(sess.user_id).first();
+  if (!user || !(await verifyPassword(current, user.pass_hash))) return c.json({ error: "wrong_current_password" }, 401);
+  await c.env.DB.prepare("UPDATE admin_users SET pass_hash = ? WHERE id = ?").bind(await hashPassword(next), user.id).run();
+  return c.json({ ok: true });
+});
+
 // ── Towns registry ───────────────────────────────────────────────────────────
 async function getTown(db, id) {
   return db.prepare("SELECT * FROM towns WHERE id = ?").bind(id).first();

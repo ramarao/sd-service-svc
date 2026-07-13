@@ -35,11 +35,12 @@ function screenLogin() {
 }
 
 async function townsList() {
-  h(`<div class="topbar"><h1>Towns</h1><div class="row grow0" style="gap:6px"><button class="small" id="dep">⚡ Deploy</button><button class="ghost small" id="add">+ Register</button><button class="ghost small" id="out">Log out</button></div></div>
+  h(`<div class="topbar"><h1>Towns</h1><div class="row grow0" style="gap:6px"><button class="small" id="dep">⚡ Deploy</button><button class="ghost small" id="add">+ Register</button><button class="ghost small" id="pw">🔑</button><button class="ghost small" id="out">Log out</button></div></div>
      <div id="list"><p class="muted">Loading…</p></div>`);
   document.getElementById("out").onclick = async () => { await api("/auth/logout", { method: "POST" }); screenLogin(); };
   document.getElementById("add").onclick = addTownForm;
   document.getElementById("dep").onclick = deployFlow;
+  document.getElementById("pw").onclick = screenPassword;
   let towns = [];
   try { towns = (await api("/api/towns")).towns || []; } catch (e) { document.getElementById("list").innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
   document.getElementById("list").innerHTML = towns.length
@@ -48,6 +49,31 @@ async function townsList() {
         <p class="muted small" style="margin:6px 0 0">${esc(t.url)}${t.wa_number ? " · 📱 " + esc(t.wa_number) : ""}${t.cf_account ? " · ☁️ " + esc(t.cf_account) : ""}</p></div>`).join("")
     : `<p class="muted">No towns yet. Add one to point the control plane at a deployed town Worker.</p>`;
   el.querySelectorAll("[data-id]").forEach((n) => (n.onclick = () => townDetail(n.dataset.id)));
+}
+
+function screenPassword() {
+  h(`<div class="topbar"><h1>Change password</h1><button class="ghost small" id="back">←</button></div>
+     <div class="card" style="max-width:420px">
+       <p class="muted small">Update the super-admin password for this control plane.</p>
+       <label>Current password</label><input id="cur" type="password" />
+       <label style="margin-top:8px">New password (min 8 chars)</label><input id="np" type="password" />
+       <label style="margin-top:8px">Confirm new password</label><input id="np2" type="password" />
+       <button id="save" style="margin-top:14px">Change password</button><p id="msg"></p>
+     </div>`);
+  document.getElementById("back").onclick = townsList;
+  document.getElementById("save").onclick = async () => {
+    const msg = document.getElementById("msg");
+    const cur = v("cur"), np = v("np"), np2 = v("np2");
+    if (np.length < 8) { msg.className = "err"; msg.textContent = "New password must be at least 8 characters."; return; }
+    if (np !== np2) { msg.className = "err"; msg.textContent = "New passwords don't match."; return; }
+    try {
+      await api("/api/account/password", { method: "POST", body: { current: cur, next: np } });
+      msg.className = "small"; msg.textContent = "Password changed ✓";
+    } catch (e) {
+      msg.className = "err";
+      msg.textContent = e.message === "wrong_current_password" ? "Current password is incorrect." : (e.data?.detail || e.message);
+    }
+  };
 }
 
 function addTownForm() {
