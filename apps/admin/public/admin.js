@@ -134,7 +134,11 @@ async function deployFlow() {
     try {
       const r = await api("/api/deploy", { method: "POST", body: { targetId: v("target"), spec: spec(), dryRun } });
       if (r.dryRun) out.textContent = `Plan for ${r.worker} (${r.domain}):\n` + r.plan.map((p, i) => `${i + 1}. [${p.method}] ${p.title}${p.note ? " → " + p.note : ""}`).join("\n");
-      else { out.textContent = `✓ Deployed ${r.worker} → https://${r.domain}`; setTimeout(townsList, 1200); }
+      else {
+        out.className = "small";
+        out.textContent = `✓ Deployed ${r.worker} → ${r.url || "https://" + r.domain}` + (r.warning ? `\n⚠️ ${r.warning}` : "");
+        setTimeout(townsList, r.warning ? 5000 : 1500);
+      }
     } catch (e) { out.className = "err small"; out.textContent = (e.data?.detail || e.message); }
   };
   document.getElementById("plan").onclick = () => run(true);

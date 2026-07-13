@@ -115,8 +115,17 @@ export async function deployTown(env, db, target, spec, { dryRun = true } = {}) 
   }
 
   // ── Live execution (creates real resources) ────────────────────────────────
-  const d1 = await cf(target, `/accounts/${acct}/d1/database`, { method: "POST", json: { name: dbName } });
-  const dbId = d1.uuid;
+  // D1: create, or reuse an existing DB of the same name (idempotent re-runs).
+  let dbId;
+  try {
+    const d1 = await cf(target, `/accounts/${acct}/d1/database`, { method: "POST", json: { name: dbName } });
+    dbId = d1.uuid;
+  } catch (e) {
+    const list = await cf(target, `/accounts/${acct}/d1/database?per_page=100`);
+    const existing = (list || []).find((d) => d.name === dbName);
+    if (!existing) throw e;
+    dbId = existing.uuid;
+  }
 
   const schema = await (await readAsset(env, "schema.sql")).text();
   await cf(target, `/accounts/${acct}/d1/database/${dbId}/query`, { method: "POST", json: { sql: schema } });
@@ -148,20 +157,43 @@ export async function deployTown(env, db, target, spec, { dryRun = true } = {}) 
     await cf(target, `/accounts/${acct}/workers/scripts/${workerName}/secrets`, { method: "PUT", json: { name, text, type: "secret_text" } });
   }
 
-  // Custom domain (needs the zone in this account).
+  // Enable the workers.dev URL so the town is reachable + controllable immediately,
+  // regardless of the custom domain. This becomes the registered URL fallback.
+  let workersDevUrl = null;
+  try {
+    await cf(target, `/accounts/${acct}/workers/scripts/${workerName}/subdomain`, { method: "POST", json: { enabled: true } });
+    const sub = await cf(target, `/accounts/${acct}/workers/subdomain`);
+    if (sub?.subdomain) workersDevUrl = `https://${workerName}.${sub.subdomain}.workers.dev`;
+  } catch { /* non-fatal */ }
+
+  // Custom domain — attach via PUT (needs the zone in this account). Non-fatal.
+  let domainWarning = null, domainAttached = false;
   if (spec.domain && target.zone_id) {
-    await cf(target, `/accounts/${acct}/workers/domains`, {
-      method: "POST",
-      json: { hostname: spec.domain, service: workerName, environment: "production", zone_id: target.zone_id },
-    });
+    try {
+      await cf(target, `/accounts/${acct}/workers/domains`, {
+        method: "PUT",
+        json: { hostname: spec.domain, service: workerName, environment: "production", zone_id: target.zone_id },
+      });
+      domainAttached = true;
+    } catch (e) {
+      domainWarning = `Worker is live${workersDevUrl ? " at " + workersDevUrl : ""}, but the custom domain wasn't attached: ${String(e.message || e)}`;
+    }
+  } else if (spec.domain) {
+    domainWarning = `Worker is live${workersDevUrl ? " at " + workersDevUrl : ""}, but no valid Zone ID on the account — custom domain not attached (add the 32-hex zone id and redeploy).`;
   }
 
-  // Register the new town so the control plane can manage it.
+  // The control plane manages the town over a URL that actually resolves now.
+  const townUrl = domainAttached ? `https://${spec.domain}` : workersDevUrl || `https://${spec.domain}`;
+
+  // Register the new town so the control plane can manage it (upsert on slug).
   const townId = randomId();
   await db
-    .prepare("INSERT INTO towns (id, slug, name, url, control_token, wa_number, domain, cf_account, status, created_at) VALUES (?,?,?,?,?,?,?,?, 'active', ?)")
-    .bind(townId, spec.slug, spec.name, `https://${spec.domain}`, controlToken, spec.wa_number || null, spec.domain, target.label, Date.now())
+    .prepare(
+      "INSERT INTO towns (id, slug, name, url, control_token, wa_number, domain, cf_account, status, created_at) VALUES (?,?,?,?,?,?,?,?, 'active', ?) " +
+        "ON CONFLICT(slug) DO UPDATE SET name=excluded.name, url=excluded.url, control_token=excluded.control_token, wa_number=excluded.wa_number, domain=excluded.domain, cf_account=excluded.cf_account, status='active'"
+    )
+    .bind(townId, spec.slug, spec.name, townUrl, controlToken, spec.wa_number || null, spec.domain, target.label, Date.now())
     .run();
 
-  return { ok: true, townId, worker: workerName, db: dbName, domain: spec.domain, controlToken };
+  return { ok: true, townId, worker: workerName, db: dbName, url: townUrl, domain: spec.domain, workersDevUrl, controlToken, ...(domainWarning ? { warning: domainWarning } : {}) };
 }
