@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS platform_settings (
   wa_verify_token       TEXT,                   -- you choose this; also pasted into Meta
   wa_app_secret         TEXT,                   -- Meta App Secret (verifies webhook sig)
   wa_token              TEXT,                   -- default access token (providers can override)
+  wa_phone_number_id    TEXT,                   -- Meta phone-number-id used to SEND (town-level)
   wa_api_version        TEXT NOT NULL DEFAULT 'v21.0',
   ola_maps_api_key      TEXT,                   -- Ola Maps API key (address autocomplete)
   wa_display_number     TEXT,                   -- WhatsApp number captains message to log in (E.164 digits)

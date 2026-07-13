@@ -129,6 +129,11 @@ export async function deployTown(env, db, target, spec, { dryRun = true } = {}) 
 
   const schema = await (await readAsset(env, "schema.sql")).text();
   await cf(target, `/accounts/${acct}/d1/database/${dbId}/query`, { method: "POST", json: { sql: schema } });
+  // Idempotent column adds for towns deployed before a schema change (CREATE IF
+  // NOT EXISTS won't alter an existing table). Each errors if the column exists.
+  for (const alter of ["ALTER TABLE platform_settings ADD COLUMN wa_phone_number_id TEXT"]) {
+    try { await cf(target, `/accounts/${acct}/d1/database/${dbId}/query`, { method: "POST", json: { sql: alter } }); } catch { /* already present */ }
+  }
 
   const assetsJwt = await uploadAssets(env, target, workerName);
 

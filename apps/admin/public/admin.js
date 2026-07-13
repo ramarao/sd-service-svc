@@ -261,6 +261,9 @@ async function townSettings(id) {
        <label style="margin-top:8px">Verify token</label>
        <input id="wa_verify_token" value="${esc(s.verify_token || "")}" placeholder="you choose this; also paste into Meta" />
 
+       <label style="margin-top:8px">Phone Number ID (Meta — needed to SEND)</label>
+       <input id="wa_phone_number_id" value="${esc(s.wa_phone_number_id || "")}" placeholder="from Meta → WhatsApp → API Setup" />
+
        <label style="margin-top:8px">WhatsApp display number (E.164 digits)</label>
        <input id="wa_display_number" value="${esc(s.wa_display_number || "")}" placeholder="e.g. 919999900000" />
 
@@ -278,11 +281,12 @@ async function townSettings(id) {
     const msg = document.getElementById("msg"); msg.className = ""; msg.textContent = "Saving…";
     // Only send non-empty fields so blank inputs never wipe existing secrets.
     const body = {};
-    for (const k of ["wa_token", "wa_app_secret", "wa_verify_token", "wa_display_number", "ola_maps_api_key", "groq_api_key"]) {
+    for (const k of ["wa_token", "wa_app_secret", "wa_verify_token", "wa_phone_number_id", "wa_display_number", "ola_maps_api_key", "groq_api_key"]) {
       const val = v(k);
       if (val) body[k] = val;
     }
     body.wa_display_number = v("wa_display_number"); // always send (may be cleared)
+    body.wa_phone_number_id = v("wa_phone_number_id");
     try { await api(`/api/towns/${id}/settings`, { method: "POST", body }); msg.className = "small"; msg.textContent = "Saved ✓"; }
     catch (e) { msg.className = "err"; msg.textContent = e.message; }
   };

@@ -1220,18 +1220,20 @@ app.get("/api/control/settings", requireControlToken, async (c) => {
     maps_set: olaConfigured(s),
     groq_set: !!s?.groq_api_key,
     wa_display_number: s?.wa_display_number || "",
+    wa_phone_number_id: s?.wa_phone_number_id || "",
   });
 });
 app.post("/api/control/settings", requireControlToken, async (c) => {
   const b = await c.req.json().catch(() => ({}));
   const cur = (await getSettings(c.env.DB)) || {};
   await c.env.DB.prepare(
-    "INSERT INTO platform_settings (id, wa_verify_token, wa_app_secret, wa_token, wa_api_version, ola_maps_api_key, groq_api_key, wa_display_number, updated_at) " +
-      "VALUES ('global',?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET wa_verify_token=excluded.wa_verify_token, wa_app_secret=excluded.wa_app_secret, wa_token=excluded.wa_token, wa_api_version=excluded.wa_api_version, ola_maps_api_key=excluded.ola_maps_api_key, groq_api_key=excluded.groq_api_key, wa_display_number=excluded.wa_display_number, updated_at=excluded.updated_at"
+    "INSERT INTO platform_settings (id, wa_verify_token, wa_app_secret, wa_token, wa_phone_number_id, wa_api_version, ola_maps_api_key, groq_api_key, wa_display_number, updated_at) " +
+      "VALUES ('global',?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET wa_verify_token=excluded.wa_verify_token, wa_app_secret=excluded.wa_app_secret, wa_token=excluded.wa_token, wa_phone_number_id=excluded.wa_phone_number_id, wa_api_version=excluded.wa_api_version, ola_maps_api_key=excluded.ola_maps_api_key, groq_api_key=excluded.groq_api_key, wa_display_number=excluded.wa_display_number, updated_at=excluded.updated_at"
   ).bind(
     b.wa_verify_token?.trim() || cur.wa_verify_token || null,
     b.wa_app_secret?.trim() ? b.wa_app_secret.trim() : cur.wa_app_secret || null,
     b.wa_token?.trim() ? b.wa_token.trim() : cur.wa_token || null,
+    b.wa_phone_number_id !== undefined ? String(b.wa_phone_number_id).trim() || null : cur.wa_phone_number_id || null,
     b.wa_api_version?.trim() || cur.wa_api_version || "v21.0",
     b.ola_maps_api_key?.trim() ? b.ola_maps_api_key.trim() : cur.ola_maps_api_key || null,
     b.groq_api_key?.trim() ? b.groq_api_key.trim() : cur.groq_api_key || null,

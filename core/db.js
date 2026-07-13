@@ -45,7 +45,7 @@ export async function getWaConfig(env, db, provider) {
   const s = await getSettings(db);
   return {
     token: provider?.wa_token || s?.wa_token || env.WA_TOKEN || null,
-    phoneNumberId: provider?.wa_phone_number_id || env.WA_PHONE_NUMBER_ID || null,
+    phoneNumberId: provider?.wa_phone_number_id || s?.wa_phone_number_id || env.WA_PHONE_NUMBER_ID || null,
     appSecret: s?.wa_app_secret || env.WA_APP_SECRET || null,
     verifyToken: s?.wa_verify_token || env.WA_VERIFY_TOKEN || null,
     apiVersion: s?.wa_api_version || "v21.0",
