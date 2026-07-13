@@ -29,6 +29,19 @@ async function cf(target, path, { method = "GET", json, form, token } = {}) {
   return data.result;
 }
 
+// Verify a deploy target's CF token can do what a town deploy needs, before deploying.
+export async function testTarget(target) {
+  const checks = [];
+  const probe = async (name, path) => {
+    try { await cf(target, path); checks.push({ name, ok: true }); }
+    catch (e) { checks.push({ name, ok: false, detail: String(e.message || e).replace(/^CF GET \S+ → /, "").slice(0, 100) }); }
+  };
+  await probe("token valid", "/user/tokens/verify");
+  await probe("D1 access", `/accounts/${target.cf_account_id}/d1/database?per_page=1`);
+  await probe("Workers access", `/accounts/${target.cf_account_id}/workers/scripts?per_page=1`);
+  return { ok: checks.every((c) => c.ok), checks };
+}
+
 // Read a file the build step placed under public/town-dist/ (served by ASSETS).
 async function readAsset(env, rel) {
   const res = await env.ASSETS.fetch(new Request(`https://town-dist/town-dist/${rel}`));

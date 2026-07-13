@@ -8,7 +8,7 @@ import { Hono } from "hono";
 import { setCookie, deleteCookie, getCookie } from "hono/cookie";
 import { randomId, hashPassword, verifyPassword } from "../../../core/crypto.js";
 import { issueSession, readSession, requireRole, COOKIE_NAME, sessionCookieOpts } from "../../../core/session.js";
-import { deployTown } from "./deploy.js";
+import { deployTown, testTarget } from "./deploy.js";
 
 const app = new Hono();
 const now = () => Date.now();
@@ -147,6 +147,12 @@ app.delete("/api/targets/:id", requireRole("super_admin"), async (c) => {
   await c.env.DB.prepare("DELETE FROM deploy_targets WHERE id = ?").bind(c.req.param("id")).run();
   return c.json({ ok: true });
 });
+// Check a target's token can do what a deploy needs (before deploying).
+app.get("/api/targets/:id/test", requireRole("super_admin"), async (c) => {
+  const t = await c.env.DB.prepare("SELECT * FROM deploy_targets WHERE id = ?").bind(c.req.param("id")).first();
+  if (!t) return c.json({ error: "not_found" }, 404);
+  return c.json(await testTarget(t));
+});
 
 // Deploy a new town Worker to a target CF account. dryRun (default) returns the
 // plan of Cloudflare API calls without executing; dryRun:false performs the deploy.
@@ -155,6 +161,9 @@ app.post("/api/deploy", requireRole("super_admin"), async (c) => {
   const target = await c.env.DB.prepare("SELECT * FROM deploy_targets WHERE id = ?").bind(targetId).first();
   if (!target) return c.json({ error: "target_not_found" }, 404);
   if (!spec?.slug || !spec?.name || !spec?.domain) return c.json({ error: "missing", need: "spec.slug, spec.name, spec.domain" }, 400);
+  // Worker/D1 names must be lowercase [a-z0-9-]; slugify defensively.
+  spec.slug = String(spec.slug).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(spec.slug)) return c.json({ error: "invalid_slug", detail: "use lowercase letters, digits, hyphens" }, 400);
   try {
     const result = await deployTown(c.env, c.env.DB, target, spec, { dryRun: dryRun !== false });
     return c.json(result);

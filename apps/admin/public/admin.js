@@ -71,6 +71,7 @@ function addTownForm() {
   };
 }
 const v = (id) => document.getElementById(id).value.trim();
+const slugify = (s) => String(s || "").toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 
 // ── Deploy a new town Worker onto a Cloudflare account ───────────────────────
 async function deployFlow() {
@@ -82,7 +83,7 @@ async function deployFlow() {
   document.getElementById("body").innerHTML = `
     <div class="card">
       <div class="row" style="align-items:baseline"><h2 style="margin:0;flex:1">Cloudflare accounts</h2><button class="ghost small grow0" id="addt">+ Account</button></div>
-      ${targets.length ? targets.map((t) => `<div class="order-line"><div><strong>${esc(t.label)}</strong><br><span class="muted small">${esc(t.cf_account_id)}${t.zone_id ? " · zone " + esc(t.zone_id) : ""}</span></div><button class="ghost small delt" data-id="${esc(t.id)}">✕</button></div>`).join("") : '<p class="muted small">No accounts yet. Add one (with a scoped CF API token) to deploy onto.</p>'}
+      ${targets.length ? targets.map((t) => `<div class="order-line"><div><strong>${esc(t.label)}</strong> <span class="test-res small" data-for="${esc(t.id)}"></span><br><span class="muted small">${esc(t.cf_account_id)}${t.zone_id ? " · zone " + esc(t.zone_id) : ""}</span></div><div class="row grow0" style="gap:6px"><button class="ghost small testt" data-id="${esc(t.id)}">Test</button><button class="ghost small delt" data-id="${esc(t.id)}">✕</button></div></div>`).join("") : '<p class="muted small">No accounts yet. Add one (with a scoped CF API token) to deploy onto.</p>'}
     </div>
     <div class="card">
       <h2 style="margin-top:0">New town</h2>
@@ -96,7 +97,24 @@ async function deployFlow() {
     </div>`;
   document.getElementById("addt").onclick = addTargetForm;
   el.querySelectorAll(".delt").forEach((b) => (b.onclick = async () => { if (confirm("Remove this account + its token?")) { await api(`/api/targets/${b.dataset.id}`, { method: "DELETE" }); deployFlow(); } }));
-  const spec = () => ({ name: v("name"), slug: v("slug"), domain: v("domain"), wa_number: v("wa") });
+  el.querySelectorAll(".testt").forEach((b) => (b.onclick = async () => {
+    const out = el.querySelector(`.test-res[data-for="${b.dataset.id}"]`);
+    out.className = "test-res small muted"; out.textContent = "testing…"; b.disabled = true;
+    try {
+      const r = await api(`/api/targets/${b.dataset.id}/test`);
+      out.className = "test-res small";
+      out.innerHTML = r.checks.map((ch) => `${ch.ok ? "✅" : "❌"} ${esc(ch.name)}`).join("  ") +
+        (r.ok ? "" : ` <span class="err">— ${esc((r.checks.find((ch) => !ch.ok) || {}).detail || "check token perms")}</span>`);
+    } catch (e) { out.className = "test-res small err"; out.textContent = e.message; }
+    b.disabled = false;
+  }));
+  // Auto-slugify: derive the slug from the name until the user edits it directly.
+  const nameI = document.getElementById("name"), slugI = document.getElementById("slug");
+  let slugTouched = false;
+  nameI.oninput = () => { if (!slugTouched) slugI.value = slugify(nameI.value); };
+  slugI.oninput = () => { slugTouched = true; };
+  slugI.onblur = () => { slugI.value = slugify(slugI.value); };
+  const spec = () => ({ name: v("name"), slug: slugify(v("slug")), domain: v("domain"), wa_number: v("wa") });
   const run = async (dryRun) => {
     const out = document.getElementById("out"); out.className = "muted small"; out.textContent = dryRun ? "Planning…" : "Deploying… (creates real resources)";
     try {
