@@ -1,9 +1,0 @@
-# Copy to .dev.vars for local `wrangler dev` (git-ignored). In production these
-# are set with `wrangler secret put <NAME>` instead.
-SESSION_SECRET="dev-only-change-me-to-a-long-random-string"
-WA_TOKEN=""
-WA_APP_SECRET=""
-WA_VERIFY_TOKEN="dev-verify-token"
-WA_PHONE_NUMBER_ID=""
-SETUP_TOKEN="dev-setup-token"
-PUBLIC_HOST="localhost:8787"

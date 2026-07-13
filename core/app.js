@@ -14,7 +14,7 @@ import { notifyOrders } from "./orders-hub.js";
 import { allowedTransitions, advanceStep, itemsEditableAt } from "./flow.js";
 import { FLOWS, flowForProvider, flowForVertical, setDefaultVertical } from "./flows/index.js";
 
-import { randomId, randomOtp, sha256Hex, hashPassword, verifyPassword } from "./crypto.js";
+import { randomId, randomOtp, sha256Hex, hashPassword, verifyPassword, timingSafeEqual } from "./crypto.js";
 import {
   issueSession,
   readSession,
@@ -1109,6 +1109,136 @@ app.post("/api/console/admins", requireRole("super_admin"), async (c) => {
     return c.json({ error: "email_taken", detail: String(e) }, 400);
   }
   return c.json({ ok: true, id });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Control-plane API — the separate super-admin (control-plane) Worker calls these
+// with the town's service token (env.CONTROL_TOKEN) to manage the town remotely:
+// verticals, providers, catalog, settings, and summary stats.
+// ─────────────────────────────────────────────────────────────────────────────
+const requireControlToken = async (c, next) => {
+  const expected = c.env.CONTROL_TOKEN;
+  const got = (c.req.header("authorization") || "").replace(/^Bearer\s+/i, "") || c.req.header("x-control-token") || "";
+  if (!expected || !got || !timingSafeEqual(String(got), String(expected))) {
+    return c.json({ error: "unauthorized" }, 401);
+  }
+  return next();
+};
+
+// Town identity + at-a-glance stats.
+app.get("/api/control/summary", requireControlToken, async (c) => {
+  const cfg = c.get("config");
+  const provs = await c.env.DB.prepare("SELECT COUNT(*) AS n FROM service_providers").first();
+  const verticals = await listVerticals(c.env.DB);
+  const { results: byStatus } = await c.env.DB.prepare("SELECT status, COUNT(*) AS n FROM orders GROUP BY status").all();
+  return c.json({
+    town: cfg.brand?.name || null,
+    defaultVertical: cfg.defaultVertical || null,
+    providers: provs?.n || 0,
+    verticals,
+    orders: Object.fromEntries((byStatus || []).map((r) => [r.status, r.n])),
+  });
+});
+
+// The flow shapes available in this build (so the admin can pick a vertical's flow).
+app.get("/api/control/flows", requireControlToken, (c) =>
+  c.json({ flows: Object.keys(FLOWS).map((k) => ({ key: k, agentTerm: FLOWS[k].agentTerm, statuses: FLOWS[k].statuses })) })
+);
+
+// Verticals (including inactive).
+app.get("/api/control/verticals", requireControlToken, async (c) => {
+  const { results } = await c.env.DB.prepare("SELECT slug, name, emoji, sort, active FROM verticals ORDER BY sort, name").all().catch(() => ({ results: [] }));
+  return c.json({ verticals: results || [] });
+});
+app.post("/api/control/verticals", requireControlToken, async (c) => {
+  const { slug, name, emoji, sort, active } = await c.req.json().catch(() => ({}));
+  if (!slug || !name) return c.json({ error: "missing" }, 400);
+  if (!FLOWS[slug]) return c.json({ error: "unknown_flow", detail: `slug must match a flow: ${Object.keys(FLOWS).join(", ")}` }, 400);
+  await c.env.DB.prepare(
+    "INSERT INTO verticals (slug, name, emoji, sort, active, created_at) VALUES (?,?,?,?,?,?) " +
+      "ON CONFLICT(slug) DO UPDATE SET name=excluded.name, emoji=excluded.emoji, sort=excluded.sort, active=excluded.active"
+  ).bind(slug, name, emoji || null, parseInt(sort, 10) || 0, active === false ? 0 : 1, now()).run();
+  return c.json({ ok: true });
+});
+
+// Providers.
+app.get("/api/control/providers", requireControlToken, async (c) => {
+  const { results } = await c.env.DB.prepare("SELECT id, slug, name, vertical, upi_id, upi_name FROM service_providers ORDER BY vertical, name").all();
+  return c.json({ providers: results || [] });
+});
+app.post("/api/control/providers", requireControlToken, async (c) => {
+  const { slug, name, vertical, upi_id, upi_name } = await c.req.json().catch(() => ({}));
+  if (!slug || !name || !vertical) return c.json({ error: "missing" }, 400);
+  const id = randomId();
+  try {
+    await c.env.DB.prepare("INSERT INTO service_providers (id, slug, name, vertical, config, upi_id, upi_name, created_at) VALUES (?,?,?,?,?,?,?,?)")
+      .bind(id, slug, name, vertical, "{}", upi_id || null, upi_name || null, now()).run();
+  } catch (e) {
+    return c.json({ error: "slug_taken_or_invalid", detail: String(e) }, 400);
+  }
+  return c.json({ ok: true, id });
+});
+app.patch("/api/control/providers/:id", requireControlToken, async (c) => {
+  const cur = await getProvider(c.env.DB, c.req.param("id"));
+  if (!cur) return c.json({ error: "not_found" }, 404);
+  const b = await c.req.json().catch(() => ({}));
+  await c.env.DB.prepare("UPDATE service_providers SET name=?, vertical=?, upi_id=?, upi_name=? WHERE id=?")
+    .bind(
+      b.name?.trim() || cur.name,
+      b.vertical || cur.vertical,
+      b.upi_id !== undefined ? b.upi_id || null : cur.upi_id,
+      b.upi_name !== undefined ? b.upi_name || null : cur.upi_name,
+      cur.id
+    ).run();
+  return c.json({ ok: true });
+});
+
+// Catalog per provider.
+app.get("/api/control/providers/:id/catalog", requireControlToken, async (c) => {
+  const { results } = await c.env.DB.prepare("SELECT id, name, category, unit, price, active FROM catalog_items WHERE provider_id = ? ORDER BY category, name").bind(c.req.param("id")).all();
+  return c.json({ catalog: results || [] });
+});
+app.post("/api/control/providers/:id/catalog", requireControlToken, async (c) => {
+  const { name, category, unit, price } = await c.req.json().catch(() => ({}));
+  if (!name) return c.json({ error: "missing" }, 400);
+  const id = randomId();
+  await c.env.DB.prepare("INSERT INTO catalog_items (id, provider_id, name, category, unit, price, active) VALUES (?,?,?,?,?,?,1)")
+    .bind(id, c.req.param("id"), name, category?.trim() || null, unit || "piece", parseInt(price, 10) || 0).run();
+  await ensureCategory(c.env.DB, c.req.param("id"), category);
+  return c.json({ ok: true, id });
+});
+
+// Settings (WhatsApp / Ola / Groq / display number). Secret fields only overwrite
+// when a non-empty value is supplied.
+app.get("/api/control/settings", requireControlToken, async (c) => {
+  const s = await getSettings(c.env.DB);
+  return c.json({
+    api_version: s?.wa_api_version || "v21.0",
+    verify_token: s?.wa_verify_token || "",
+    app_secret_set: !!s?.wa_app_secret,
+    token_set: !!s?.wa_token,
+    maps_set: olaConfigured(s),
+    groq_set: !!s?.groq_api_key,
+    wa_display_number: s?.wa_display_number || "",
+  });
+});
+app.post("/api/control/settings", requireControlToken, async (c) => {
+  const b = await c.req.json().catch(() => ({}));
+  const cur = (await getSettings(c.env.DB)) || {};
+  await c.env.DB.prepare(
+    "INSERT INTO platform_settings (id, wa_verify_token, wa_app_secret, wa_token, wa_api_version, ola_maps_api_key, groq_api_key, wa_display_number, updated_at) " +
+      "VALUES ('global',?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET wa_verify_token=excluded.wa_verify_token, wa_app_secret=excluded.wa_app_secret, wa_token=excluded.wa_token, wa_api_version=excluded.wa_api_version, ola_maps_api_key=excluded.ola_maps_api_key, groq_api_key=excluded.groq_api_key, wa_display_number=excluded.wa_display_number, updated_at=excluded.updated_at"
+  ).bind(
+    b.wa_verify_token?.trim() || cur.wa_verify_token || null,
+    b.wa_app_secret?.trim() ? b.wa_app_secret.trim() : cur.wa_app_secret || null,
+    b.wa_token?.trim() ? b.wa_token.trim() : cur.wa_token || null,
+    b.wa_api_version?.trim() || cur.wa_api_version || "v21.0",
+    b.ola_maps_api_key?.trim() ? b.ola_maps_api_key.trim() : cur.ola_maps_api_key || null,
+    b.groq_api_key?.trim() ? b.groq_api_key.trim() : cur.groq_api_key || null,
+    b.wa_display_number !== undefined ? String(b.wa_display_number).replace(/[^\d]/g, "") || null : cur.wa_display_number || null,
+    now()
+  ).run();
+  return c.json({ ok: true });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
