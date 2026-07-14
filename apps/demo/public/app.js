@@ -265,8 +265,11 @@ async function customerNewOrder(slug, provider) {
       <div id="addrsection"></div>
       ${provider.photo_order ? `<div class="photo-order" id="photocard">
         <strong>📷 Order from a photo or list</strong>
-        <p class="muted small" style="margin:4px 0 8px">Upload a picture of your handwritten list${provider.vertical === "delivery" ? ", prescription" : ""} or the items themselves — we'll read them for you.</p>
-        <input type="file" id="photofile" accept="image/*" />
+        <p class="muted small" style="margin:4px 0 8px">Send a picture of your handwritten list${provider.vertical === "delivery" ? ", prescription" : ""} or the items themselves — we'll read them for you.</p>
+        <div class="row" style="gap:8px">
+          <label class="photo-btn">📷 Take photo<input type="file" id="photocam" accept="image/*" capture="environment" hidden /></label>
+          <label class="photo-btn">🖼️ Choose file<input type="file" id="photofile" accept="image/*" hidden /></label>
+        </div>
         <p id="photostatus" class="small" style="margin:6px 0"></p>
         <div id="photoitems"></div>
       </div>` : ""}
@@ -350,8 +353,9 @@ async function customerNewOrder(slug, provider) {
   // Extracted items that match the catalog fill the picker; the rest are kept as
   // free-text "extra" lines the shop prices on accept.
   let extraItems = [];
-  const photoFile = document.getElementById("photofile");
-  if (photoFile) {
+  const photoFile = document.getElementById("photofile"); // "Choose file"
+  const photoCam = document.getElementById("photocam");   // "Take photo" (capture=camera)
+  if (photoFile || photoCam) {
     const pstatus = document.getElementById("photostatus");
     const pitems = document.getElementById("photoitems");
     const setCatalogQty = (name, qty) => {
@@ -378,8 +382,7 @@ async function customerNewOrder(slug, provider) {
         row.querySelector(".xrm").onclick = () => { extraItems.splice(i, 1); renderExtras(); };
       });
     };
-    photoFile.onchange = async () => {
-      const f = photoFile.files?.[0];
+    const handlePhoto = async (f) => {
       if (!f) return;
       if (f.size > 6 * 1024 * 1024) { pstatus.className = "small err"; pstatus.textContent = "Image too large (max 6 MB)."; return; }
       pstatus.className = "small muted"; pstatus.textContent = "Reading your list…";
@@ -406,6 +409,9 @@ async function customerNewOrder(slug, provider) {
           : "Couldn't read that image. Try a clearer photo or add items manually.";
       }
     };
+    // Both the camera and the file picker feed the same handler. Reset value after
+    // so re-selecting the same file (or retaking a photo) fires change again.
+    [photoCam, photoFile].forEach((inp) => inp && (inp.onchange = () => { const f = inp.files?.[0]; inp.value = ""; handlePhoto(f); }));
   }
 
   // ── Address book ──

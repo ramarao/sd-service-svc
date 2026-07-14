@@ -523,5 +523,21 @@ ol.steps li { margin: 8px 0; }
   padding: 12px;
   margin: 12px 0;
 }
-.photo-order input[type="file"] { font-size: 13px; }
 .photo-order .summary-line .xrm { padding: 0 8px; line-height: 1.6; }
+.photo-btn {
+  flex: 1 1 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 11px 10px;
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  background: var(--paper, transparent);
+  color: var(--accent-strong);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+}
+.photo-btn:active { background: var(--accent-tint); }
