@@ -387,18 +387,21 @@ async function customerNewOrder(slug, provider) {
     });
 
     let photoSeq = 0;
-    // Merge an extracted item into the shared list by name (case-insensitive):
-    // sum the quantity and remember which image contributed it.
+    // Merge an extracted item into the shared list, keyed by name + written amount
+    // (so "Rice 3 kg" and "Rice 2 kg" stay separate but a plain repeat merges):
+    // sum the count and remember which image contributed it.
     const mergeItem = (imgId, raw) => {
-      const key = raw.name.trim().toLowerCase();
-      if (!key) return;
-      const existing = photoItems.find((it) => it.name.toLowerCase() === key);
+      const nm = raw.name.trim();
+      const amount = (raw.amount || "").trim();
+      if (!nm) return;
+      const key = (nm + "|" + amount).toLowerCase();
+      const existing = photoItems.find((it) => (it.name + "|" + it.amount).toLowerCase() === key);
       if (existing) {
         existing.qty += raw.qty;
         if (!existing.imgIds.includes(imgId)) existing.imgIds.push(imgId);
         if (!existing.note && raw.note) existing.note = raw.note;
       } else {
-        photoItems.push({ name: raw.name.trim(), qty: raw.qty, price: priceOf.get(key) || 0, note: raw.note || "", imgIds: [imgId] });
+        photoItems.push({ name: nm, amount, qty: raw.qty, price: priceOf.get(nm.toLowerCase()) || 0, note: raw.note || "", imgIds: [imgId] });
       }
     };
     // Delete an image: forget it as a source for every item; an item stays while it
@@ -416,7 +419,7 @@ async function customerNewOrder(slug, provider) {
       pthumbs.querySelectorAll(".pthumb-x").forEach((b) => (b.onclick = () => removeImage(b.dataset.id)));
       pitems.innerHTML = photoItems.length
         ? `<div class="summary-head">Items from your photos</div>` +
-          photoItems.map((it, i) => `<div class="summary-line" data-i="${i}"><span style="flex:1">${esc(it.name)}${it.price ? "" : ` <span class="muted">· shop prices</span>`}${it.note ? ` <span class="muted">(${esc(it.note)})</span>` : ""}</span><div class="qtyctrl"><button type="button" class="qbtn iminus">−</button><input class="qnum iqty" type="number" min="1" value="${it.qty}" inputmode="numeric" /><button type="button" class="qbtn iplus">+</button></div><button type="button" class="qbtn xrm" title="Remove item">✕</button></div>`).join("")
+          photoItems.map((it, i) => `<div class="summary-line" data-i="${i}"><span style="flex:1">${esc(it.name)}${it.amount ? ` <span class="muted">· ${esc(it.amount)}</span>` : ""}${it.price ? "" : ` <span class="muted">· shop prices</span>`}${it.note ? ` <span class="muted">(${esc(it.note)})</span>` : ""}</span><div class="qtyctrl"><button type="button" class="qbtn iminus">−</button><input class="qnum iqty" type="number" min="1" value="${it.qty}" inputmode="numeric" /><button type="button" class="qbtn iplus">+</button></div><button type="button" class="qbtn xrm" title="Remove item">✕</button></div>`).join("")
         : "";
       pitems.querySelectorAll(".summary-line").forEach((row) => {
         const i = +row.dataset.i, num = row.querySelector(".iqty"), it = photoItems[i];
@@ -441,7 +444,7 @@ async function customerNewOrder(slug, provider) {
         // its items into the shared list, deduped by name.
         const imgId = "img" + ++photoSeq;
         photoImages.push({ id: imgId, thumb });
-        kept.forEach((it) => mergeItem(imgId, { name: it.name, qty: it.qty, note: it.note || "" }));
+        kept.forEach((it) => mergeItem(imgId, { name: it.name, amount: it.amount || "", qty: it.qty, note: it.note || "" }));
         renderPhotos(); recalc();
         pstatus.className = "small ok";
         pstatus.textContent = kept.length
@@ -676,7 +679,9 @@ async function customerNewOrder(slug, provider) {
     const items = [...picker.querySelectorAll(".pick-row")]
       .map((r) => ({ name: r.dataset.name, qty: Math.max(0, parseInt(r.querySelector(".qnum").value, 10) || 0) }))
       .filter((i) => i.qty > 0)
-      .concat(photoItems.map((it) => ({ name: it.name, qty: it.qty }))); // items read from the photos (merged by name)
+      // items read from the photos (merged by name); carry the written weight into the
+      // name for shop-priced items so the shop sees "Toor dal (3 kg)" on the order.
+      .concat(photoItems.map((it) => ({ name: it.amount && !it.price ? `${it.name} (${it.amount})` : it.name, qty: it.qty })));
     const images = photoImages.map((im) => im.thumb);
     const msg = document.getElementById("msg");
     if (!selectedAddrId) { msg.className = "err"; msg.textContent = "Select or add a service address."; return; }

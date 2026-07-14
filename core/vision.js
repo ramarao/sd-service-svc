@@ -13,7 +13,7 @@ const VERTICAL_HINTS = {
 
 /**
  * Extract orderable items from an image.
- * @returns {Promise<{ok:boolean, items?:Array<{name:string,qty:number,inCatalog:boolean,relevant:boolean,note:string}>, error?:string}>}
+ * @returns {Promise<{ok:boolean, items?:Array<{name:string,amount:string,qty:number,inCatalog:boolean,relevant:boolean,note:string}>, error?:string}>}
  */
 export async function extractItemsFromImage(env, db, provider, dataUrl) {
   if (!dataUrl || !/^data:image\/(png|jpe?g|webp|gif);base64,/.test(dataUrl)) {
@@ -22,6 +22,8 @@ export async function extractItemsFromImage(env, db, provider, dataUrl) {
   const settings = await getSettings(db);
   const key = settings?.groq_api_key || env.GROQ_API_KEY;
   if (!key) return { ok: false, error: "groq_not_configured" };
+  // Scout is the vision model available on the town's Groq plan. Override with
+  // env.GROQ_VISION_MODEL (e.g. a Maverick/other vision model) where available.
   const model = env.GROQ_VISION_MODEL || "meta-llama/llama-4-scout-17b-16e-instruct";
 
   // The provider's own catalog anchors names + tells us what's genuinely on sale.
@@ -34,21 +36,24 @@ export async function extractItemsFromImage(env, db, provider, dataUrl) {
   const hint = VERTICAL_HINTS[vertical] || "the goods or services this shop provides.";
 
   const sys =
-    `You read an image a customer sent to the shop "${provider.name}". ` +
+    `You transcribe a photo a customer sent to the shop "${provider.name}". ` +
+    "It is usually a handwritten or printed shopping list, a prescription, or a photo of the goods themselves. " +
+    "The writing is often in a regional Indian language (Telugu, Hindi, Tamil, Kannada, Malayalam, Bengali, Marathi, Gujarati, Punjabi, Odia, Urdu) or a mix with English, and may be old or faded.\n" +
     `This shop deals in: ${hint}\n` +
-    (catalogNames.length
-      ? `Its catalog (preferred spellings): ${catalogNames.join(", ")}.\n`
-      : "") +
-    "Identify every distinct real-world item visible (handwritten list, printed list, prescription, or a photo of the goods themselves). " +
-    "For each item decide whether it plausibly belongs to THIS shop's line of business. " +
+    (catalogNames.length ? `For spelling reference only, its catalog is: ${catalogNames.join(", ")}.\n` : "") +
+    "TRANSCRIBE FAITHFULLY. Read the ACTUAL word on each line and give its common English name (transliterate/translate exactly what is written). " +
+    "You MUST NOT substitute a typical/generic product, and MUST NOT invent items from the shop's usual inventory. " +
+    "If a line is illegible, skip it — do NOT guess. It is far better to return fewer, correct items than to fabricate a plausible list. " +
+    "A line usually has an item, then a quantity/weight, and sometimes a price in rupees — capture the item and its quantity/weight, but IGNORE money/prices.\n" +
     "Return ONLY a JSON object of the form " +
-    `{"items":[{"name": string, "qty": integer>=1, "inCatalog": boolean, "relevant": boolean, "note": string}]}. ` +
-    "Rules: 'name' — use the catalog spelling when it matches, else a clean singular name. " +
-    "'qty' — the count/quantity shown (default 1). " +
-    "'inCatalog' — true only if it clearly matches a catalog name above. " +
-    "'relevant' — true if it belongs to this shop's business, false for unrelated things (e.g. an iPhone on a vegetable list). " +
-    "'note' — short reason when relevant is false or qty/unit is ambiguous, else empty string. " +
-    "Do not invent items that are not in the image. Return valid JSON only.";
+    `{"items":[{"name": string, "amount": string, "qty": integer>=1, "inCatalog": boolean, "relevant": boolean, "note": string}]}. ` +
+    "'name' — the item's English name, faithful to what is written. Examples (Telugu): 'కంది పప్పు'→'Toor dal', 'పెసర పప్పు'→'Moong dal', 'మినప పప్పు'→'Urad dal', 'శనగ పప్పు'→'Chana dal', 'ఆవాలు'→'Mustard seeds', 'జీలకర్ర'→'Cumin', 'మెంతులు'→'Fenugreek seeds', 'మిరపకాయలు'→'Red chilli', 'ఇంగువ'→'Asafoetida', 'నూనె'→'Oil', 'పంచదార'→'Sugar', 'నెయ్యి'→'Ghee', 'సబ్బు'→'Soap'. " +
+    "'amount' — the quantity/weight EXACTLY as written next to the item, e.g. '3 kg', '1/2 kg', '1/4 kg', '250 g', '2 packets'; empty string if none is written. " +
+    "'qty' — a whole-number count of packs/pieces (default 1); when the amount is a weight, keep qty 1 and put the weight in 'amount'. " +
+    "'inCatalog' — true only if the item clearly matches a catalog name above. " +
+    "'relevant' — true if it belongs to this shop's business, false only for clearly unrelated things. " +
+    "'note' — the original-script text or a short clarification when useful, else empty string. " +
+    "Return valid JSON only.";
 
   let res;
   try {
@@ -90,6 +95,7 @@ export async function extractItemsFromImage(env, db, provider, dataUrl) {
   const items = (Array.isArray(parsed?.items) ? parsed.items : [])
     .map((it) => ({
       name: String(it?.name || "").trim(),
+      amount: String(it?.amount || "").trim(), // written quantity/weight, e.g. "3 kg", "1/2 kg"
       qty: Math.max(1, parseInt(it?.qty, 10) || 1),
       inCatalog: !!it?.inCatalog,
       relevant: it?.relevant !== false, // default to relevant unless the model says otherwise
