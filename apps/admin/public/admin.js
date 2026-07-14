@@ -217,7 +217,7 @@ async function townDetail(id) {
 
     <div class="card">
       <div class="row" style="align-items:baseline"><h2 style="margin:0;flex:1">Verticals</h2><button class="ghost small grow0" id="addv">+ Vertical</button></div>
-      ${(verts.verticals || []).map((x) => `<div class="order-line"><div><strong>${esc(x.emoji || "")} ${esc(x.name)}</strong> <span class="muted">${esc(x.slug)}</span>${x.flow ? ` <span class="badge ASSIGNED">${esc(x.flow)}</span>` : ""}</div><span class="badge ${x.active ? "ACCEPTED" : "REJECTED"}">${x.active ? "on" : "off"}</span></div>`).join("") || '<p class="muted small">None.</p>'}
+      ${(verts.verticals || []).map((x) => `<div class="order-line tap" data-vslug="${esc(x.slug)}"><div><strong>${esc(x.emoji || "")} ${esc(x.name)}</strong> <span class="muted">${esc(x.slug)}</span>${x.flow ? ` <span class="badge ASSIGNED">${esc(x.flow)}</span>` : ""}</div><span class="badge ${x.active ? "ACCEPTED" : "REJECTED"}">${x.active ? "on" : "off"}</span> <span class="chev">›</span></div>`).join("") || '<p class="muted small">None.</p>'}
     </div>
 
     <div class="card">
@@ -232,6 +232,40 @@ async function townDetail(id) {
   document.getElementById("settings").onclick = () => townSettings(id);
   document.getElementById("del").onclick = async () => { if (confirm("Remove this town from the registry? (The town Worker itself keeps running.)")) { await api(`/api/towns/${id}`, { method: "DELETE" }); townsList(); } };
   el.querySelectorAll("[data-pid]").forEach((n) => (n.onclick = () => providerDetail(id, (provs.providers || []).find((p) => p.id === n.dataset.pid))));
+  el.querySelectorAll("[data-vslug]").forEach((n) => (n.onclick = () => verticalDetail(id, (verts.verticals || []).find((v) => v.slug === n.dataset.vslug))));
+}
+
+// Vertical detail — rename, re-emoji, re-sort, switch flow, activate/deactivate, delete.
+async function verticalDetail(townId, vtc) {
+  let flows = [];
+  try { flows = (await api(`/api/towns/${townId}/flows`)).flows || []; } catch {}
+  h(`<div class="topbar"><h1>${esc(vtc.emoji || "")} ${esc(vtc.name)}</h1><button class="ghost small" id="back">←</button></div>
+     <div class="card">
+       <label>Name</label><input id="v_name" value="${esc(vtc.name)}" />
+       <label style="margin-top:8px">Flow</label>
+       <select id="v_flow">${flows.map((f) => `<option value="${esc(f.key)}" ${f.key === vtc.flow ? "selected" : ""}>${esc(f.key)} · ${esc(f.agentTerm)}</option>`).join("") || `<option value="${esc(vtc.flow || "")}">${esc(vtc.flow || "—")}</option>`}</select>
+       <label style="margin-top:8px">Emoji</label><input id="v_emoji" value="${esc(vtc.emoji || "")}" />
+       <label style="margin-top:8px">Sort</label><input id="v_sort" type="number" value="${vtc.sort || 0}" />
+       <label class="row" style="margin-top:12px;gap:8px;align-items:center;cursor:pointer"><input type="checkbox" id="v_active" ${vtc.active ? "checked" : ""} style="width:auto;margin:0" /><span>Active <span class="muted small">— shown to customers in the chooser</span></span></label>
+       <p class="muted small" style="margin-top:8px">Slug <code>${esc(vtc.slug)}</code> can't be changed (providers link to it).</p>
+       <div class="row" style="margin-top:12px;gap:8px"><button class="grow0" id="vsave">Save</button><button class="ghost grow0" id="vdel">Delete vertical</button></div>
+       <p id="vmsg"></p>
+     </div>`);
+  document.getElementById("back").onclick = () => townDetail(townId);
+  document.getElementById("vsave").onclick = async () => {
+    const msg = document.getElementById("vmsg");
+    try {
+      // POST upserts by slug — same slug + new fields = edit.
+      await api(`/api/towns/${townId}/verticals`, { method: "POST", body: { slug: vtc.slug, name: v("v_name"), flow: v("v_flow"), emoji: v("v_emoji"), sort: parseInt(v("v_sort"), 10) || 0, active: document.getElementById("v_active").checked } });
+      msg.className = "small"; msg.textContent = "Saved ✓";
+    } catch (e) { msg.className = "err"; msg.textContent = e.data?.detail || e.message; }
+  };
+  document.getElementById("vdel").onclick = async () => {
+    if (!confirm(`Delete vertical "${vtc.name}"?`)) return;
+    const msg = document.getElementById("vmsg");
+    try { await api(`/api/towns/${townId}/verticals/${encodeURIComponent(vtc.slug)}`, { method: "DELETE" }); townDetail(townId); }
+    catch (e) { msg.className = "err"; msg.textContent = e.data?.detail || e.message; }
+  };
 }
 
 // Provider detail — edit/delete, managers (admin numbers), captains, catalog.

@@ -130,7 +130,8 @@ const towned = (subpath) => async (c) => {
 app.get("/api/towns/:id/summary", requireRole("super_admin"), towned("summary"));
 app.get("/api/towns/:id/flows", requireRole("super_admin"), towned("flows"));
 app.get("/api/towns/:id/verticals", requireRole("super_admin"), towned("verticals"));
-app.post("/api/towns/:id/verticals", requireRole("super_admin"), towned("verticals"));
+app.post("/api/towns/:id/verticals", requireRole("super_admin"), towned("verticals")); // add or edit (upsert by slug)
+app.delete("/api/towns/:id/verticals/:slug", requireRole("super_admin"), (c) => proxyTown(c, `/api/control/verticals/${encodeURIComponent(c.req.param("slug"))}`));
 app.get("/api/towns/:id/providers", requireRole("super_admin"), towned("providers"));
 app.post("/api/towns/:id/providers", requireRole("super_admin"), towned("providers"));
 app.get("/api/towns/:id/settings", requireRole("super_admin"), towned("settings"));

@@ -1244,6 +1244,14 @@ app.post("/api/control/verticals", requireControlToken, async (c) => {
   ).bind(slug, name, flow, emoji || null, parseInt(sort, 10) || 0, active === false ? 0 : 1, now()).run();
   return c.json({ ok: true });
 });
+app.delete("/api/control/verticals/:slug", requireControlToken, async (c) => {
+  const slug = c.req.param("slug");
+  // Guard: a vertical still holding providers can't be deleted (would orphan them).
+  const row = await c.env.DB.prepare("SELECT COUNT(*) AS n FROM service_providers WHERE vertical = ?").bind(slug).first().catch(() => ({ n: 0 }));
+  if ((row?.n || 0) > 0) return c.json({ error: "has_providers", detail: `${row.n} provider(s) still use this vertical — move or remove them first.` }, 409);
+  await c.env.DB.prepare("DELETE FROM verticals WHERE slug = ?").bind(slug).run();
+  return c.json({ ok: true });
+});
 
 // Providers.
 app.get("/api/control/providers", requireControlToken, async (c) => {
