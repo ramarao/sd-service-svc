@@ -202,6 +202,16 @@ CREATE TABLE IF NOT EXISTS order_items (
 );
 CREATE INDEX IF NOT EXISTS idx_items_order ON order_items(order_id);
 
+-- ── Photos/lists a customer uploaded for an order (photo_order providers) ─────
+-- Stores the (client-downscaled) image data URL; shown on the order detail page.
+CREATE TABLE IF NOT EXISTS order_images (
+  id         TEXT PRIMARY KEY,
+  order_id   TEXT NOT NULL REFERENCES orders(id),
+  data       TEXT NOT NULL,          -- 'data:image/jpeg;base64,…' (downscaled client-side)
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_order_images_order ON order_images(order_id);
+
 -- ── Per-day order-number counter (drives 001-DDMMYY ids) ─────────────────────
 CREATE TABLE IF NOT EXISTS order_counters (
   day TEXT PRIMARY KEY,     -- 'DDMMYY' (IST)

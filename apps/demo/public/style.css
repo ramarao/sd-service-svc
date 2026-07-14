@@ -541,3 +541,12 @@ ol.steps li { margin: 8px 0; }
   user-select: none;
 }
 .photo-btn:active { background: var(--accent-tint); }
+/* Uploaded-photo thumbnails (order form + order detail pages). */
+.pthumbs { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 2px; }
+.pthumb { position: relative; display: inline-block; width: 74px; height: 74px; border-radius: 8px; overflow: hidden; border: 1px solid var(--border); }
+.pthumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.pthumb-x {
+  position: absolute; top: 3px; right: 3px; width: 20px; height: 20px;
+  border-radius: 50%; border: none; padding: 0; cursor: pointer;
+  background: rgba(0, 0, 0, 0.6); color: #fff; font-size: 11px; line-height: 20px;
+}

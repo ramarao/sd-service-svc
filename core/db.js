@@ -318,7 +318,7 @@ export async function listCaptainJobs(db, flow, phone, providerId) {
 }
 
 // ── Orders ───────────────────────────────────────────────────────────────────
-export async function createOrder(db, { providerId, customerId, address, lat, lng, addressId, customerName, customerPhone, contactName, contactPhone, items, note }) {
+export async function createOrder(db, { providerId, customerId, address, lat, lng, addressId, customerName, customerPhone, contactName, contactPhone, items, note, images }) {
   const ts = now();
   const id = await nextOrderId(db, ts);
   const latN = Number.isFinite(+lat) ? +lat : null;
@@ -347,6 +347,15 @@ export async function createOrder(db, { providerId, customerId, address, lat, ln
       db
         .prepare("INSERT INTO order_items (id, order_id, name, qty, unit_price) VALUES (?,?,?,?,?)")
         .bind(randomId(), id, it.name, qty, unit)
+    );
+  }
+  // Persist any uploaded photos/lists (already downscaled client-side).
+  for (const data of images || []) {
+    if (typeof data !== "string" || !data.startsWith("data:image/")) continue;
+    stmts.push(
+      db
+        .prepare("INSERT INTO order_images (id, order_id, data, created_at) VALUES (?,?,?,?)")
+        .bind(randomId(), id, data, ts)
     );
   }
   stmts.push(
@@ -393,8 +402,13 @@ export async function getOrder(db, id) {
     .prepare("SELECT status, actor, at FROM order_events WHERE order_id = ? ORDER BY at ASC")
     .bind(id)
     .all();
+  let images = [];
+  try {
+    const r = await db.prepare("SELECT id, data FROM order_images WHERE order_id = ? ORDER BY created_at ASC").bind(id).all();
+    images = r.results || [];
+  } catch { /* table absent on legacy D1 */ }
   const total = (items || []).reduce((s, it) => s + it.qty * (it.unit_price || 0), 0);
-  return { ...order, items, events, total };
+  return { ...order, items, events, images, total };
 }
 
 // Advance/transition status, write an event, and notify the customer. The flow

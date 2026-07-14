@@ -201,6 +201,10 @@ async function orderDetail(id) {
     : `<div class="card"><h2 style="margin-top:0">Items</h2><ul>${items || '<li class="muted">No items</li>'}</ul>
         <div class="row" style="align-items:baseline"><strong style="flex:1">Total</strong><strong style="font-size:17px">${money(order.total)}</strong></div>
         ${paymentLine}</div>`;
+  // Customer-uploaded photos/lists (tap to view full size).
+  const imagesCardHtml = (order.images || []).length
+    ? `<div class="card"><h2 style="margin-top:0">Customer photos</h2><div class="pthumbs">${order.images.map((im) => `<a href="${im.data}" target="_blank" rel="noopener" class="pthumb"><img src="${im.data}" alt="customer photo" /></a>`).join("")}</div></div>`
+    : "";
 
   let controls;
   if (order.status === "REQUESTED") {
@@ -236,6 +240,7 @@ async function orderDetail(id) {
       ${order.delivery_captain_name ? `<p class="muted small" style="margin:2px 0 0">🛵 ${esc(order.delivery_captain_name)}${order.delivery_captain_phone ? ` · <a href="tel:${esc(order.delivery_captain_phone)}">${esc(order.delivery_captain_phone)}</a>` : ""}</p>` : ""}
     </div>
     ${itemsCardHtml}
+    ${imagesCardHtml}
     <div class="card"><h2 style="margin-top:0">Action</h2>${controls}</div>
     <div class="card"><h2 style="margin-top:0">History</h2><ul class="timeline">${(order.events || []).map((e) => `<li>${badge(e.status)} <span class="muted">${fmtDate(e.at)} · ${esc(e.actor)}</span></li>`).join("")}</ul></div>`);
   document.getElementById("back").onclick = dashboard;

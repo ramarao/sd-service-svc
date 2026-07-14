@@ -584,10 +584,14 @@ app.post("/api/my/orders/extract", requireRole("customer"), async (c) => {
 
 app.post("/api/my/orders", requireRole("customer"), async (c) => {
   const sess = c.get("session");
-  const { slug, address, lat, lng, address_id, items, note } = await c.req.json().catch(() => ({}));
+  const { slug, address, lat, lng, address_id, items, note, images } = await c.req.json().catch(() => ({}));
   const provider = await getProviderBySlug(c.env.DB, slug);
   if (!provider) return c.json({ error: "unknown_provider" }, 400);
   if (!Array.isArray(items) || items.length === 0) return c.json({ error: "no_items" }, 400);
+  // Only accept stored photos for photo_order providers; cap count + size defensively.
+  const imgs = provider.photo_order && Array.isArray(images)
+    ? images.filter((d) => typeof d === "string" && d.startsWith("data:image/") && d.length < 900_000).slice(0, 8)
+    : [];
 
   // Prefer a saved address (ownership-checked); fall back to inline address/lat/lng.
   let addr = address,
@@ -622,6 +626,7 @@ app.post("/api/my/orders", requireRole("customer"), async (c) => {
     contactPhone: cPhone,
     items,
     note,
+    images: imgs,
   });
   await notifyOrders(c.env, provider.id);
   return c.json({ ok: true, order });

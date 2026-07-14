@@ -271,6 +271,7 @@ async function customerNewOrder(slug, provider) {
           <label class="photo-btn">🖼️ Choose file<input type="file" id="photofile" accept="image/*" hidden /></label>
         </div>
         <p id="photostatus" class="small" style="margin:6px 0"></p>
+        <div id="photothumbs" class="pthumbs"></div>
         <div id="photoitems"></div>
       </div>` : ""}
       <h2>Items</h2>
@@ -291,6 +292,11 @@ async function customerNewOrder(slug, provider) {
 
   // ── Items picker (multi-select with quantity) ──
   const picker = document.getElementById("picker");
+  // Photo/list uploads: one entry per image, each carrying the items read from it,
+  // so deleting an image cleanly removes exactly its items. Priced items count
+  // toward the total; unpriced (non-catalog) ones are settled by the shop.
+  let photoImages = [];
+  const photoSum = () => photoImages.reduce((s, im) => s + im.items.reduce((a, it) => a + (it.price || 0) * it.qty, 0), 0);
   const recalc = () => {
     let sum = 0;
     const selected = [];
@@ -300,6 +306,7 @@ async function customerNewOrder(slug, provider) {
       if (qty > 0) selected.push({ name: r.dataset.name, cat: r.dataset.cat, qty, price });
       sum += price * qty;
     });
+    sum += photoSum();
     document.getElementById("total").textContent = money(sum, cur);
     // Selected-items summary, grouped by category (always visible, even when a
     // category chip is hiding some of the picked items).
@@ -349,59 +356,75 @@ async function customerNewOrder(slug, provider) {
     };
   });
 
-  // ── Photo / list order (Groq vision) ──
-  // Extracted items that match the catalog fill the picker; the rest are kept as
-  // free-text "extra" lines the shop prices on accept.
-  let extraItems = [];
+  // ── Photo / list order (Groq vision), multiple images ──
   const photoFile = document.getElementById("photofile"); // "Choose file"
   const photoCam = document.getElementById("photocam");   // "Take photo" (capture=camera)
   if (photoFile || photoCam) {
     const pstatus = document.getElementById("photostatus");
+    const pthumbs = document.getElementById("photothumbs");
     const pitems = document.getElementById("photoitems");
-    const setCatalogQty = (name, qty) => {
-      const row = [...picker.querySelectorAll(".pick-row")].find((r) => r.dataset.name.toLowerCase() === String(name).toLowerCase());
-      if (!row) return false;
-      const num = row.querySelector(".qnum");
-      num.value = Math.max(parseInt(num.value, 10) || 0, qty);
-      row.classList.toggle("picked", (parseInt(num.value, 10) || 0) > 0);
-      return true;
-    };
-    const renderExtras = () => {
-      pitems.innerHTML = extraItems.length
-        ? `<div class="summary-head">From your photo — shop will confirm the price</div>` +
-          extraItems
-            .map((it, i) => `<div class="summary-line" data-i="${i}"><span style="flex:1">${esc(it.name)}${it.note ? ` <span class="muted">(${esc(it.note)})</span>` : ""}</span><div class="qtyctrl"><button type="button" class="qbtn eminus">−</button><input class="qnum eqty" type="number" min="1" value="${it.qty}" inputmode="numeric" /><button type="button" class="qbtn eplus">+</button></div><button type="button" class="qbtn xrm" title="Remove">✕</button></div>`)
-            .join("")
+    const priceOf = new Map((provider.catalog || []).map((ci) => [String(ci.name).toLowerCase(), ci.price || 0]));
+
+    // Downscale before upload — smaller for Groq + fits D1 storage. Longest side ≤ 1280.
+    const downscale = (file) => new Promise((resolve, reject) => {
+      const rd = new FileReader();
+      rd.onerror = reject;
+      rd.onload = () => {
+        const img = new Image();
+        img.onerror = reject;
+        img.onload = () => {
+          const max = 1280, scale = Math.min(1, max / Math.max(img.width, img.height));
+          const w = Math.round(img.width * scale), h = Math.round(img.height * scale);
+          const cv = document.createElement("canvas"); cv.width = w; cv.height = h;
+          cv.getContext("2d").drawImage(img, 0, 0, w, h);
+          resolve(cv.toDataURL("image/jpeg", 0.6));
+        };
+        img.src = rd.result;
+      };
+      rd.readAsDataURL(file);
+    });
+
+    // Flat, per-image-tagged item list (each line knows its source image → delete
+    // an image removes exactly its items). Priced items also show in the total.
+    const renderPhotos = () => {
+      pthumbs.innerHTML = photoImages
+        .map((im, i) => `<div class="pthumb"><img src="${im.thumb}" alt="photo ${i + 1}" /><button type="button" class="pthumb-x" data-img="${i}" title="Remove photo &amp; its items">✕</button></div>`)
+        .join("");
+      pthumbs.querySelectorAll(".pthumb-x").forEach((b) => (b.onclick = () => { photoImages.splice(+b.dataset.img, 1); renderPhotos(); recalc(); }));
+      const rows = [];
+      photoImages.forEach((im, ii) => im.items.forEach((it, ji) => rows.push({ ii, ji, it })));
+      pitems.innerHTML = rows.length
+        ? `<div class="summary-head">Items from your photos</div>` +
+          rows.map(({ ii, ji, it }) => `<div class="summary-line" data-ii="${ii}" data-ji="${ji}"><span style="flex:1">${esc(it.name)}${photoImages.length > 1 ? ` <span class="muted">📷${ii + 1}</span>` : ""}${it.price ? "" : ` <span class="muted">· shop prices</span>`}${it.note ? ` <span class="muted">(${esc(it.note)})</span>` : ""}</span><div class="qtyctrl"><button type="button" class="qbtn iminus">−</button><input class="qnum iqty" type="number" min="1" value="${it.qty}" inputmode="numeric" /><button type="button" class="qbtn iplus">+</button></div><button type="button" class="qbtn xrm" title="Remove item">✕</button></div>`).join("")
         : "";
       pitems.querySelectorAll(".summary-line").forEach((row) => {
-        const i = +row.dataset.i;
-        const num = row.querySelector(".eqty");
-        row.querySelector(".eplus").onclick = () => { extraItems[i].qty++; renderExtras(); };
-        row.querySelector(".eminus").onclick = () => { extraItems[i].qty = Math.max(1, extraItems[i].qty - 1); renderExtras(); };
-        num.onchange = () => { extraItems[i].qty = Math.max(1, parseInt(num.value, 10) || 1); };
-        row.querySelector(".xrm").onclick = () => { extraItems.splice(i, 1); renderExtras(); };
+        const ii = +row.dataset.ii, ji = +row.dataset.ji, num = row.querySelector(".iqty");
+        const it = photoImages[ii].items[ji];
+        row.querySelector(".iplus").onclick = () => { it.qty++; renderPhotos(); recalc(); };
+        row.querySelector(".iminus").onclick = () => { it.qty = Math.max(1, it.qty - 1); renderPhotos(); recalc(); };
+        num.onchange = () => { it.qty = Math.max(1, parseInt(num.value, 10) || 1); recalc(); };
+        row.querySelector(".xrm").onclick = () => { photoImages[ii].items.splice(ji, 1); renderPhotos(); recalc(); };
       });
     };
-    const handlePhoto = async (f) => {
-      if (!f) return;
-      if (f.size > 6 * 1024 * 1024) { pstatus.className = "small err"; pstatus.textContent = "Image too large (max 6 MB)."; return; }
-      pstatus.className = "small muted"; pstatus.textContent = "Reading your list…";
-      let dataUrl;
-      try { dataUrl = await new Promise((res, rej) => { const rd = new FileReader(); rd.onload = () => res(rd.result); rd.onerror = rej; rd.readAsDataURL(f); }); }
-      catch { pstatus.className = "small err"; pstatus.textContent = "Couldn't read that file."; return; }
+
+    const handlePhoto = async (file) => {
+      if (!file) return;
+      pstatus.className = "small muted"; pstatus.textContent = "Reading your photo…";
+      let thumb;
+      try { thumb = await downscale(file); }
+      catch { pstatus.className = "small err"; pstatus.textContent = "Couldn't read that image."; return; }
       try {
-        const { items } = await api("/api/my/orders/extract", { method: "POST", body: { slug, image: dataUrl } });
+        const { items } = await api("/api/my/orders/extract", { method: "POST", body: { slug, image: thumb } });
         const kept = (items || []).filter((it) => it.relevant !== false);
         const dropped = (items || []).length - kept.length;
-        let matched = 0;
-        extraItems = [];
-        kept.forEach((it) => { if (setCatalogQty(it.name, it.qty)) matched++; else extraItems.push({ name: it.name, qty: it.qty, note: it.note || "" }); });
-        renderExtras();
-        recalc();
+        // Keep the image regardless (shown on the order for the shop to read); attach
+        // whatever items we recognised, priced from the catalog when they match.
+        photoImages.push({ thumb, items: kept.map((it) => ({ name: it.name, qty: it.qty, price: priceOf.get(String(it.name).toLowerCase()) || 0, note: it.note || "" })) });
+        renderPhotos(); recalc();
         pstatus.className = "small ok";
         pstatus.textContent = kept.length
-          ? `Found ${kept.length} item${kept.length === 1 ? "" : "s"} — ${matched} from the menu, ${extraItems.length} extra${dropped ? `, ${dropped} unrelated skipped` : ""}. Review below, then place your request.`
-          : "No matching items found — try a clearer photo or add items manually.";
+          ? `Added ${kept.length} item${kept.length === 1 ? "" : "s"} from this photo${dropped ? ` (${dropped} unrelated skipped)` : ""}. Add more photos or place your request.`
+          : "Photo added — we couldn't read items from it; the shop will check it. Add items manually if you like.";
       } catch (e) {
         pstatus.className = "small err";
         pstatus.textContent = e.message === "groq_not_configured"
@@ -631,14 +654,15 @@ async function customerNewOrder(slug, provider) {
     const items = [...picker.querySelectorAll(".pick-row")]
       .map((r) => ({ name: r.dataset.name, qty: Math.max(0, parseInt(r.querySelector(".qnum").value, 10) || 0) }))
       .filter((i) => i.qty > 0)
-      .concat(extraItems.map((e) => ({ name: e.name, qty: e.qty }))); // photo/list extras (priced by the shop)
+      .concat(photoImages.flatMap((im) => im.items.map((it) => ({ name: it.name, qty: it.qty })))); // items read from the photos
+    const images = photoImages.map((im) => im.thumb);
     const msg = document.getElementById("msg");
     if (!selectedAddrId) { msg.className = "err"; msg.textContent = "Select or add a service address."; return; }
-    if (!items.length) { msg.className = "err"; msg.textContent = "Add at least one item (use + to set quantity)."; return; }
+    if (!items.length) { msg.className = "err"; msg.textContent = "Add at least one item (use + to set quantity) or upload a photo."; return; }
     try {
       await api("/api/my/orders", {
         method: "POST",
-        body: { slug, address_id: selectedAddrId, items, note: document.getElementById("note").value },
+        body: { slug, address_id: selectedAddrId, items, note: document.getElementById("note").value, images },
       });
       renderCustomer(slug);
     } catch (e) { msg.className = "err"; msg.textContent = e.message; }
@@ -651,11 +675,13 @@ async function customerTrack(id) {
     .map((i) => `<li>${esc(i.name)} × ${i.qty}${i.unit_price ? ` <span class="muted">— ${money(i.qty * i.unit_price)}</span>` : ""}</li>`)
     .join("");
   const tl = order.events.map((e) => `<li>${badge(e.status)} <span class="muted">${fmtDate(e.at)}</span></li>`).join("");
+  const imgs = (order.images || []).map((im) => `<a href="${im.data}" target="_blank" rel="noopener" class="pthumb"><img src="${im.data}" alt="uploaded photo" /></a>`).join("");
   h(`
     <div class="topbar"><h1>Order ${esc(order.id)}</h1><button class="ghost small" id="back">← Back</button></div>
     <div class="card">${badge(order.status)} ${order.agent_name ? `<span class="muted">· 🔧 ${esc(CFG.brand?.agentTerm || "Technician")}: ${esc(order.agent_name)}</span>` : order.delivery_captain_name ? `<span class="muted">· 🛵 ${esc(order.delivery_captain_name)}</span>` : ""}
       <h2>Items</h2><ul>${items}</ul>
       <div class="row" style="align-items:baseline"><strong style="flex:1">Total</strong><strong style="flex:0 0 auto;font-size:17px">${money(order.total)}</strong></div>
+      ${imgs ? `<h2>Your photos</h2><div class="pthumbs">${imgs}</div>` : ""}
       ${order.address ? `<p class="muted" style="margin-top:8px">${esc(order.address)}</p>` : ""}
     </div>
     <div class="card"><h2>Progress</h2><ul class="timeline">${tl}</ul></div>`);
