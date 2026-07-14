@@ -284,6 +284,7 @@ async function providerDetail(townId, p) {
   document.getElementById("body").innerHTML = `
     <div class="card">
       <label>Name</label><input id="p_name" value="${esc(p.name)}" />
+      <label style="margin-top:8px">Slug <span class="muted small">— URL id (${esc(p.slug)}/app), lowercase-with-hyphens</span></label><input id="p_slug" value="${esc(p.slug || "")}" />
       <label style="margin-top:8px">Vertical</label>
       <select id="p_vertical">${(verts.verticals || []).map((x) => `<option value="${esc(x.slug)}" ${x.slug === p.vertical ? "selected" : ""}>${esc(x.name)}</option>`).join("") || `<option value="${esc(p.vertical || "")}">${esc(p.vertical || "—")}</option>`}</select>
       <label style="margin-top:8px">UPI ID</label><input id="p_upi" value="${esc(p.upi_id || "")}" placeholder="shop@upi" />
@@ -330,7 +331,7 @@ async function providerDetail(townId, p) {
 
   document.getElementById("psave").onclick = async () => {
     const msg = document.getElementById("pmsg");
-    try { await api(A(""), { method: "PATCH", body: { name: v("p_name"), vertical: v("p_vertical"), upi_id: v("p_upi"), photo_order: document.getElementById("p_photo").checked } }); msg.className = "small"; msg.textContent = "Saved ✓"; }
+    try { await api(A(""), { method: "PATCH", body: { name: v("p_name"), slug: slugify(v("p_slug")), vertical: v("p_vertical"), upi_id: v("p_upi"), photo_order: document.getElementById("p_photo").checked } }); msg.className = "small"; msg.textContent = "Saved ✓"; }
     catch (e) { msg.className = "err"; msg.textContent = e.message; }
   };
   document.getElementById("pdel").onclick = async () => {
@@ -388,13 +389,19 @@ async function addProvider(id) {
      <div class="card"><p class="muted small">Add a shop under a vertical in this town.</p>
        <label>Vertical</label><select id="vertical">${verts.map((x) => `<option value="${esc(x.slug)}">${esc(x.name)}</option>`).join("")}</select>
        <label style="margin-top:8px">Name</label><input id="name" placeholder="Sparkle Dhobi" />
-       <label style="margin-top:8px">Slug</label><input id="slug" placeholder="sparkle-dhobi" />
+       <label style="margin-top:8px">Slug <span class="muted small">— URL id, lowercase-with-hyphens</span></label><input id="slug" placeholder="sparkle-dhobi" />
        <label style="margin-top:8px">UPI ID (optional)</label><input id="upi" placeholder="shop@upi" />
        <button id="save" style="margin-top:14px">Add provider</button><p id="msg" class="err"></p></div>`);
   document.getElementById("back").onclick = () => townDetail(id);
+  // Auto-slugify the slug from the name until the user edits it directly.
+  const nameI = document.getElementById("name"), slugI = document.getElementById("slug");
+  let slugTouched = false;
+  nameI.oninput = () => { if (!slugTouched) slugI.value = slugify(nameI.value); };
+  slugI.oninput = () => { slugTouched = true; };
+  slugI.onblur = () => { slugI.value = slugify(slugI.value); };
   document.getElementById("save").onclick = async () => {
     const msg = document.getElementById("msg"); msg.textContent = "";
-    try { await api(`/api/towns/${id}/providers`, { method: "POST", body: { slug: v("slug"), name: v("name"), vertical: v("vertical"), upi_id: v("upi") } }); townDetail(id); }
+    try { await api(`/api/towns/${id}/providers`, { method: "POST", body: { slug: slugify(v("slug") || v("name")), name: v("name"), vertical: v("vertical"), upi_id: v("upi") } }); townDetail(id); }
     catch (e) { msg.textContent = e.data?.detail || e.message; }
   };
 }

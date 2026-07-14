@@ -94,7 +94,7 @@ async function route() {
     if (path === "/console" || path === "/admin") return renderDashboard();
     if (path === "/start") return renderStart();
     const m = path.match(/^\/([^/]+)\/app$/);
-    if (m) return renderCustomer(m[1]);
+    if (m) { let s; try { s = decodeURIComponent(m[1]); } catch { s = m[1]; } return renderCustomer(s); }
     return renderLanding();
   } catch (e) {
     h(`<div class="card"><p class="err">${esc(e.message)}</p></div>`);

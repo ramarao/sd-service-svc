@@ -1259,7 +1259,10 @@ app.get("/api/control/providers", requireControlToken, async (c) => {
   return c.json({ providers: results || [] });
 });
 app.post("/api/control/providers", requireControlToken, async (c) => {
-  const { slug, name, vertical, photo_order, upi_id, upi_name } = await c.req.json().catch(() => ({}));
+  const { slug: rawSlug, name, vertical, photo_order, upi_id, upi_name } = await c.req.json().catch(() => ({}));
+  // Slug is URL path (/{slug}/app) → must be URL-safe. Slugify defensively so a
+  // name like "Ravi Chicken" can't be stored as "ravi chicken".
+  const slug = String(rawSlug || name || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
   if (!slug || !name || !vertical) return c.json({ error: "missing" }, 400);
   const id = randomId();
   try {
@@ -1274,16 +1277,25 @@ app.patch("/api/control/providers/:id", requireControlToken, async (c) => {
   const cur = await getProvider(c.env.DB, c.req.param("id"));
   if (!cur) return c.json({ error: "not_found" }, 404);
   const b = await c.req.json().catch(() => ({}));
-  await c.env.DB.prepare("UPDATE service_providers SET name=?, vertical=?, photo_order=?, upi_id=?, upi_name=? WHERE id=?")
-    .bind(
-      b.name?.trim() || cur.name,
-      b.vertical || cur.vertical,
-      b.photo_order !== undefined ? (b.photo_order ? 1 : 0) : (cur.photo_order || 0),
-      b.upi_id !== undefined ? b.upi_id || null : cur.upi_id,
-      b.upi_name !== undefined ? b.upi_name || null : cur.upi_name,
-      cur.id
-    ).run();
-  return c.json({ ok: true });
+  // Slug editable (slugified); keep the current one if the new value is empty.
+  const slug = b.slug !== undefined
+    ? String(b.slug).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || cur.slug
+    : cur.slug;
+  try {
+    await c.env.DB.prepare("UPDATE service_providers SET name=?, slug=?, vertical=?, photo_order=?, upi_id=?, upi_name=? WHERE id=?")
+      .bind(
+        b.name?.trim() || cur.name,
+        slug,
+        b.vertical || cur.vertical,
+        b.photo_order !== undefined ? (b.photo_order ? 1 : 0) : (cur.photo_order || 0),
+        b.upi_id !== undefined ? b.upi_id || null : cur.upi_id,
+        b.upi_name !== undefined ? b.upi_name || null : cur.upi_name,
+        cur.id
+      ).run();
+  } catch (e) {
+    return c.json({ error: "slug_taken", detail: String(e) }, 400);
+  }
+  return c.json({ ok: true, slug });
 });
 
 // Catalog per provider.
