@@ -366,10 +366,17 @@ async function customerNewOrder(slug, provider) {
       pitems.innerHTML = extraItems.length
         ? `<div class="summary-head">From your photo — shop will confirm the price</div>` +
           extraItems
-            .map((it, i) => `<div class="summary-line"><span>${esc(it.name)} × ${it.qty}${it.note ? ` <span class="muted">(${esc(it.note)})</span>` : ""}</span><button type="button" class="qbtn xrm" data-i="${i}">✕</button></div>`)
+            .map((it, i) => `<div class="summary-line" data-i="${i}"><span style="flex:1">${esc(it.name)}${it.note ? ` <span class="muted">(${esc(it.note)})</span>` : ""}</span><div class="qtyctrl"><button type="button" class="qbtn eminus">−</button><input class="qnum eqty" type="number" min="1" value="${it.qty}" inputmode="numeric" /><button type="button" class="qbtn eplus">+</button></div><button type="button" class="qbtn xrm" title="Remove">✕</button></div>`)
             .join("")
         : "";
-      pitems.querySelectorAll(".xrm").forEach((b) => (b.onclick = () => { extraItems.splice(+b.dataset.i, 1); renderExtras(); }));
+      pitems.querySelectorAll(".summary-line").forEach((row) => {
+        const i = +row.dataset.i;
+        const num = row.querySelector(".eqty");
+        row.querySelector(".eplus").onclick = () => { extraItems[i].qty++; renderExtras(); };
+        row.querySelector(".eminus").onclick = () => { extraItems[i].qty = Math.max(1, extraItems[i].qty - 1); renderExtras(); };
+        num.onchange = () => { extraItems[i].qty = Math.max(1, parseInt(num.value, 10) || 1); };
+        row.querySelector(".xrm").onclick = () => { extraItems.splice(i, 1); renderExtras(); };
+      });
     };
     photoFile.onchange = async () => {
       const f = photoFile.files?.[0];
