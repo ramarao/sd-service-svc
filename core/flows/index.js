@@ -19,9 +19,13 @@ export function setDefaultVertical(v) {
   if (v && FLOWS[v]) _defaultVertical = v;
 }
 
-// Resolve the flow for a provider row. Falls back to the Worker's default vertical.
+// Resolve the flow for a provider row. Prefers the flow of the provider's vertical
+// (populated as `vertical_flow` by getProvider's join) so many verticals can share
+// one flow — e.g. medical/fruits/milk verticals all run 'delivery'. Falls back to
+// treating the vertical slug itself as a flow key (legacy: slug == flow key), then
+// to the Worker's default vertical.
 export function flowForProvider(provider) {
-  const key = provider?.vertical || _defaultVertical;
+  const key = provider?.vertical_flow || provider?.vertical || _defaultVertical;
   return FLOWS[key] || FLOWS[_defaultVertical];
 }
 

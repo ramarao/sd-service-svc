@@ -22,8 +22,10 @@ CREATE TABLE IF NOT EXISTS platform_settings (
 -- slug == a flow registry key (core/flows): laundry | appliance | delivery | …
 -- The flow logic lives in code; this table is per-town display + enablement.
 CREATE TABLE IF NOT EXISTS verticals (
-  slug        TEXT PRIMARY KEY,        -- 'laundry', 'appliance', 'delivery'
-  name        TEXT NOT NULL,           -- 'Laundry', 'Appliance Repair', 'Shop Delivery'
+  slug        TEXT PRIMARY KEY,        -- the vertical's own identity: 'medical', 'fruits', 'milk', 'laundry'
+  name        TEXT NOT NULL,           -- 'Medical', 'Fruits', 'Milk', 'Laundry'
+  flow        TEXT,                    -- flow registry key that drives its orders: 'delivery'|'laundry'|'appliance'
+                                       -- (many verticals may share one flow: medical/fruits/milk → 'delivery')
   emoji       TEXT,                    -- shown in the customer chooser
   sort        INTEGER NOT NULL DEFAULT 0,
   active      INTEGER NOT NULL DEFAULT 1,

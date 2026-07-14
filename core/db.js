@@ -53,24 +53,34 @@ export async function getWaConfig(env, db, provider) {
 }
 
 // ── Providers ────────────────────────────────────────────────────────────────
+// Providers join to their vertical so callers get `vertical_flow` (the flow key
+// that drives the order lifecycle). Falls back to a plain select on legacy D1s
+// that predate the `verticals` table.
+async function providerWithFlow(db, where, val) {
+  try {
+    return await db
+      .prepare(`SELECT sp.*, v.flow AS vertical_flow FROM service_providers sp LEFT JOIN verticals v ON v.slug = sp.vertical WHERE ${where}`)
+      .bind(val)
+      .first();
+  } catch {
+    return db.prepare(`SELECT sp.* FROM service_providers sp WHERE ${where}`).bind(val).first();
+  }
+}
 export async function getProvider(db, id) {
-  return db.prepare("SELECT * FROM service_providers WHERE id = ?").bind(id).first();
+  return providerWithFlow(db, "sp.id = ?", id);
 }
 export async function getProviderBySlug(db, slug) {
-  return db.prepare("SELECT * FROM service_providers WHERE slug = ?").bind(slug).first();
+  return providerWithFlow(db, "sp.slug = ?", slug);
 }
 export async function getProviderByPhoneNumberId(db, pnid) {
-  return db
-    .prepare("SELECT * FROM service_providers WHERE wa_phone_number_id = ?")
-    .bind(pnid)
-    .first();
+  return providerWithFlow(db, "sp.wa_phone_number_id = ?", pnid);
 }
 
 // ── Verticals (town-enabled service categories; slug == flow registry key) ────
 export async function listVerticals(db) {
   try {
     const { results } = await db
-      .prepare("SELECT slug, name, emoji, sort FROM verticals WHERE active = 1 ORDER BY sort, name")
+      .prepare("SELECT slug, name, flow, emoji, sort FROM verticals WHERE active = 1 ORDER BY sort, name")
       .all();
     return results || [];
   } catch {

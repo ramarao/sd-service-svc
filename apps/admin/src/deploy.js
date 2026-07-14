@@ -134,6 +134,9 @@ export async function deployTown(env, db, target, spec, { dryRun = true } = {}) 
   for (const alter of [
     "ALTER TABLE platform_settings ADD COLUMN wa_phone_number_id TEXT",
     "ALTER TABLE service_providers ADD COLUMN photo_order INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE verticals ADD COLUMN flow TEXT",
+    // Backfill: pre-decoupling rows used slug as the flow key. Safe to re-run.
+    "UPDATE verticals SET flow = slug WHERE flow IS NULL OR flow = ''",
   ]) {
     try { await cf(target, `/accounts/${acct}/d1/database/${dbId}/query`, { method: "POST", json: { sql: alter } }); } catch { /* already present */ }
   }

@@ -217,7 +217,7 @@ async function townDetail(id) {
 
     <div class="card">
       <div class="row" style="align-items:baseline"><h2 style="margin:0;flex:1">Verticals</h2><button class="ghost small grow0" id="addv">+ Vertical</button></div>
-      ${(verts.verticals || []).map((x) => `<div class="order-line"><div><strong>${esc(x.emoji || "")} ${esc(x.name)}</strong> <span class="muted">${esc(x.slug)}</span></div><span class="badge ${x.active ? "ACCEPTED" : "REJECTED"}">${x.active ? "on" : "off"}</span></div>`).join("") || '<p class="muted small">None.</p>'}
+      ${(verts.verticals || []).map((x) => `<div class="order-line"><div><strong>${esc(x.emoji || "")} ${esc(x.name)}</strong> <span class="muted">${esc(x.slug)}</span>${x.flow ? ` <span class="badge ASSIGNED">${esc(x.flow)}</span>` : ""}</div><span class="badge ${x.active ? "ACCEPTED" : "REJECTED"}">${x.active ? "on" : "off"}</span></div>`).join("") || '<p class="muted small">None.</p>'}
     </div>
 
     <div class="card">
@@ -327,16 +327,22 @@ async function addVertical(id) {
   let flows = [];
   try { flows = (await api(`/api/towns/${id}/flows`)).flows || []; } catch {}
   h(`<div class="topbar"><h1>Add vertical</h1><button class="ghost small" id="back">←</button></div>
-     <div class="card"><p class="muted small">Enable a service category in this town. The slug must match a flow shape in the build.</p>
-       <label>Flow / slug</label><select id="slug">${flows.map((f) => `<option value="${esc(f.key)}">${esc(f.key)} · ${esc(f.agentTerm)}</option>`).join("")}</select>
-       <label style="margin-top:8px">Name</label><input id="name" placeholder="Laundry" />
-       <label style="margin-top:8px">Emoji</label><input id="emoji" placeholder="🧺" />
+     <div class="card"><p class="muted small">A vertical is a category customers pick (Medical, Fruits, Milk…). Many verticals can share one <b>flow</b> — e.g. Medical, Fruits and Milk all run the Delivery flow.</p>
+       <label>Flow</label><select id="flow">${flows.map((f) => `<option value="${esc(f.key)}">${esc(f.key)} · ${esc(f.agentTerm)}</option>`).join("")}</select>
+       <label style="margin-top:8px">Name</label><input id="name" placeholder="Medical" />
+       <label style="margin-top:8px">Slug</label><input id="slug" placeholder="medical" />
+       <label style="margin-top:8px">Emoji</label><input id="emoji" placeholder="💊" />
        <label style="margin-top:8px">Sort</label><input id="sort" type="number" value="0" />
        <button id="save" style="margin-top:14px">Save vertical</button><p id="msg" class="err"></p></div>`);
   document.getElementById("back").onclick = () => townDetail(id);
+  // Auto-suggest the slug from the name until the user edits the slug directly.
+  const nameEl = document.getElementById("name"), slugEl = document.getElementById("slug");
+  let slugTouched = false;
+  slugEl.oninput = () => { slugTouched = true; };
+  nameEl.oninput = () => { if (!slugTouched) slugEl.value = nameEl.value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, ""); };
   document.getElementById("save").onclick = async () => {
     const msg = document.getElementById("msg"); msg.textContent = "";
-    try { await api(`/api/towns/${id}/verticals`, { method: "POST", body: { slug: v("slug"), name: v("name"), emoji: v("emoji"), sort: parseInt(v("sort"), 10) || 0 } }); townDetail(id); }
+    try { await api(`/api/towns/${id}/verticals`, { method: "POST", body: { flow: v("flow"), slug: v("slug") || v("name"), name: v("name"), emoji: v("emoji"), sort: parseInt(v("sort"), 10) || 0 } }); townDetail(id); }
     catch (e) { msg.textContent = e.data?.detail || e.message; }
   };
 }

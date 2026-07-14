@@ -1178,17 +1178,24 @@ app.get("/api/control/flows", requireControlToken, (c) =>
 
 // Verticals (including inactive).
 app.get("/api/control/verticals", requireControlToken, async (c) => {
-  const { results } = await c.env.DB.prepare("SELECT slug, name, emoji, sort, active FROM verticals ORDER BY sort, name").all().catch(() => ({ results: [] }));
+  const { results } = await c.env.DB.prepare("SELECT slug, name, flow, emoji, sort, active FROM verticals ORDER BY sort, name").all().catch(() => ({ results: [] }));
   return c.json({ verticals: results || [] });
 });
 app.post("/api/control/verticals", requireControlToken, async (c) => {
-  const { slug, name, emoji, sort, active } = await c.req.json().catch(() => ({}));
+  const body = await c.req.json().catch(() => ({}));
+  const name = body.name;
+  // The flow (state machine) the vertical runs. Many verticals may share one flow
+  // (medical/fruits/milk → 'delivery'). Slug is the vertical's own identity; it
+  // defaults to the flow key so older single-vertical-per-flow callers still work.
+  const flow = body.flow || body.slug;
+  const slug = String(body.slug || flow || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  const { emoji, sort, active } = body;
   if (!slug || !name) return c.json({ error: "missing" }, 400);
-  if (!FLOWS[slug]) return c.json({ error: "unknown_flow", detail: `slug must match a flow: ${Object.keys(FLOWS).join(", ")}` }, 400);
+  if (!FLOWS[flow]) return c.json({ error: "unknown_flow", detail: `flow must be one of: ${Object.keys(FLOWS).join(", ")}` }, 400);
   await c.env.DB.prepare(
-    "INSERT INTO verticals (slug, name, emoji, sort, active, created_at) VALUES (?,?,?,?,?,?) " +
-      "ON CONFLICT(slug) DO UPDATE SET name=excluded.name, emoji=excluded.emoji, sort=excluded.sort, active=excluded.active"
-  ).bind(slug, name, emoji || null, parseInt(sort, 10) || 0, active === false ? 0 : 1, now()).run();
+    "INSERT INTO verticals (slug, name, flow, emoji, sort, active, created_at) VALUES (?,?,?,?,?,?,?) " +
+      "ON CONFLICT(slug) DO UPDATE SET name=excluded.name, flow=excluded.flow, emoji=excluded.emoji, sort=excluded.sort, active=excluded.active"
+  ).bind(slug, name, flow, emoji || null, parseInt(sort, 10) || 0, active === false ? 0 : 1, now()).run();
   return c.json({ ok: true });
 });
 
