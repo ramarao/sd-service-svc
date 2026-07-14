@@ -152,26 +152,66 @@ function renderTab() {
 const pid = () => encodeURIComponent(state.providerId);
 
 // ── Tab: Orders ─────────────────────────────────────────────────────────────
+// IST calendar day (YYYY-MM-DD), optionally offset by N days.
+function mgrDay(offset = 0) { return new Date(Date.now() + 330 * 60000 - (offset * 86400000)).toISOString().slice(0, 10); }
+
 async function tabOrders() {
-  content().innerHTML = `<p class="muted">Loading orders…</p>`;
-  let orders = [];
-  try { orders = (await api(`/api/admin/orders`)).orders || []; } catch (e) { content().innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
-  const B = statusBuckets();
-  const groups = [
-    { key: "REQUESTED", label: "🆕 New requests", match: (s) => s === B.from },
-    { key: "ACTIVE", label: "In progress", match: (s) => B.active.includes(s) },
-    { key: "DONE", label: "Completed", match: (s) => B.terminal.includes(s) },
-  ];
-  const row = (o) => `<div class="card job tap" data-id="${esc(o.id)}">
-      <div class="row" style="align-items:baseline"><strong style="flex:1">${esc(o.id)}</strong>${badge(o.status)}<span class="chev" style="margin-left:6px">›</span></div>
-      ${o.customer_name || o.customer_phone ? `<p class="small" style="margin:6px 0 0">👤 ${esc([o.customer_name, o.customer_phone].filter(Boolean).join(" · "))}</p>` : ""}
-      <div class="row small" style="margin-top:4px;align-items:baseline"><span class="muted" style="flex:1">${fmtDate(o.created_at)}</span>${paidPill(o)}<strong>${money(o.total)}</strong></div>
-    </div>`;
-  content().innerHTML = `<div id="mgrOrdersMarker" hidden></div>` + groups.map((g) => {
-    const list = orders.filter((o) => g.match(o.status));
-    return `<h2 class="sec">${g.label} ${list.length ? `<span class="count">${list.length}</span>` : ""}</h2>${list.length ? list.map(row).join("") : `<p class="muted small">None.</p>`}`;
-  }).join("");
-  content().querySelectorAll("[data-id]").forEach((n) => (n.onclick = () => orderDetail(n.dataset.id)));
+  const today = mgrDay(0);
+  if (!state.ordersFilter) state.ordersFilter = { from: today, to: today, status: "" }; // default: today · all statuses
+  const F = state.ordersFilter;
+  const statuses = [...(state.flow.statuses || []), ...((state.flow.terminal || []).filter((t) => !(state.flow.statuses || []).includes(t)))];
+  content().innerHTML = `
+    <div class="card">
+      <h2>Filter</h2>
+      <div class="row">
+        <div><label>From</label><input type="date" id="of_from" value="${esc(F.from)}" /></div>
+        <div><label>To</label><input type="date" id="of_to" value="${esc(F.to)}" /></div>
+      </div>
+      <div class="row" style="margin-top:8px;flex-wrap:wrap">
+        <button class="small grow0" id="of_apply">Apply</button>
+        <button class="ghost small grow0" id="of_today">Today</button>
+        <button class="ghost small grow0" id="of_week">Last 7 days</button>
+        <button class="ghost small grow0" id="of_all">All dates</button>
+      </div>
+      <label>Status</label>
+      <select id="of_status"><option value="">All statuses</option>${statuses.map((s) => `<option value="${esc(s)}" ${F.status === s ? "selected" : ""}>${esc(s.replace(/_/g, " "))}</option>`).join("")}</select>
+    </div>
+    <div id="mgrOrdersMarker" hidden></div>
+    <div id="mgrOrdersList"><p class="muted">Loading orders…</p></div>`;
+
+  const syncInputs = () => { document.getElementById("of_from").value = F.from; document.getElementById("of_to").value = F.to; };
+  const loadOrders = async () => {
+    const listEl = document.getElementById("mgrOrdersList");
+    const q = new URLSearchParams();
+    if (F.from) q.set("from", F.from);
+    if (F.to) q.set("to", F.to);
+    if (F.status) q.set("status", F.status);
+    let orders = [];
+    try { orders = (await api(`/api/admin/orders?${q.toString()}`)).orders || []; } catch (e) { listEl.innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+    const B = statusBuckets();
+    const groups = [
+      { key: "REQUESTED", label: "🆕 New requests", match: (s) => s === B.from },
+      { key: "ACTIVE", label: "In progress", match: (s) => B.active.includes(s) },
+      { key: "DONE", label: "Completed", match: (s) => B.terminal.includes(s) },
+    ];
+    const row = (o) => `<div class="card job tap" data-id="${esc(o.id)}">
+        <div class="row" style="align-items:baseline"><strong style="flex:1">${esc(o.id)}</strong>${badge(o.status)}<span class="chev" style="margin-left:6px">›</span></div>
+        ${o.customer_name || o.customer_phone ? `<p class="small" style="margin:6px 0 0">👤 ${esc([o.customer_name, o.customer_phone].filter(Boolean).join(" · "))}</p>` : ""}
+        <div class="row small" style="margin-top:4px;align-items:baseline"><span class="muted" style="flex:1">${fmtDate(o.created_at)}</span>${paidPill(o)}<strong>${money(o.total)}</strong></div>
+      </div>`;
+    listEl.innerHTML = orders.length
+      ? groups.map((g) => { const l = orders.filter((o) => g.match(o.status)); return l.length ? `<h2 class="sec">${g.label} <span class="count">${l.length}</span></h2>${l.map(row).join("")}` : ""; }).join("") || '<p class="muted small">No orders in this range.</p>'
+      : '<p class="muted small">No orders in this range.</p>';
+    listEl.querySelectorAll("[data-id]").forEach((n) => (n.onclick = () => orderDetail(n.dataset.id)));
+  };
+
+  const apply = () => { F.from = document.getElementById("of_from").value; F.to = document.getElementById("of_to").value; F.status = document.getElementById("of_status").value; loadOrders(); };
+  document.getElementById("of_apply").onclick = apply;
+  document.getElementById("of_status").onchange = apply;
+  document.getElementById("of_today").onclick = () => { F.from = F.to = today; syncInputs(); loadOrders(); };
+  document.getElementById("of_week").onclick = () => { F.from = mgrDay(6); F.to = today; syncInputs(); loadOrders(); };
+  document.getElementById("of_all").onclick = () => { F.from = ""; F.to = ""; syncInputs(); loadOrders(); };
+  loadOrders();
 }
 
 async function orderDetail(id) {
