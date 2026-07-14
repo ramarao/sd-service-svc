@@ -182,6 +182,26 @@ async function orderDetail(id) {
   const { order, customer, allowedNext = [], captains = [] } = d;
   const items = (order.items || []).map((i) => `<li>${esc(i.name)} × ${i.qty}${i.unit_price ? ` <span class="muted">— ${money(i.qty * i.unit_price)}</span>` : ""}</li>`).join("");
 
+  // Before accepting, the manager can reconcile the item list — essential for
+  // photo/list orders where Groq guessed the items. Editable only at REQUESTED.
+  const editable = order.status === "REQUESTED";
+  let draftItems = (order.items || []).map((i) => ({ name: i.name, qty: i.qty }));
+  const paymentLine = order.payment_status
+    ? `<p class="small" style="margin:8px 0 0">${order.payment_status === "paid" ? "✅ <b>Paid</b>" : "❌ <b>Payment failed</b>"}${order.payment_amount ? " · " + money(order.payment_amount) : ""}${order.payment_payer ? " · " + esc(order.payment_payer) : ""}${order.payment_ref ? ` <span class="muted">(ref ${esc(order.payment_ref)})</span>` : ""}</p>`
+    : `<p class="muted small" style="margin:8px 0 0">Payment: awaiting</p>`;
+  const itemsCardHtml = editable
+    ? `<div class="card"><h2 style="margin-top:0">Items <span class="muted small">— review before accepting</span></h2>
+        <div id="edititems"></div>
+        <div class="row" style="gap:6px;margin-top:10px;align-items:flex-end">
+          <div style="flex:1"><label>Add item</label><input id="ni_name" placeholder="e.g. Tomato" /></div>
+          <div><label>Qty</label><input id="ni_qty" type="number" min="1" value="1" style="width:64px" /></div>
+          <button class="grow0 ghost small" id="ni_add">Add</button>
+        </div>
+        <p id="imsg" class="small"></p></div>`
+    : `<div class="card"><h2 style="margin-top:0">Items</h2><ul>${items || '<li class="muted">No items</li>'}</ul>
+        <div class="row" style="align-items:baseline"><strong style="flex:1">Total</strong><strong style="font-size:17px">${money(order.total)}</strong></div>
+        ${paymentLine}</div>`;
+
   let controls;
   if (order.status === "REQUESTED") {
     controls = `<p class="muted">Awaiting your decision.</p><div class="row"><button id="accept">Accept</button><button id="reject" class="ghost">Reject</button></div><p id="msg"></p>`;
@@ -215,9 +235,7 @@ async function orderDetail(id) {
       ${order.agent_name ? `<p class="muted small" style="margin:6px 0 0">🔧 ${esc(state.brand?.agentTerm || "Technician")}: ${esc(order.agent_name)}${order.captain_phone ? ` · <a href="tel:${esc(order.captain_phone)}">${esc(order.captain_phone)}</a>` : ""}</p>` : ""}
       ${order.delivery_captain_name ? `<p class="muted small" style="margin:2px 0 0">🛵 ${esc(order.delivery_captain_name)}${order.delivery_captain_phone ? ` · <a href="tel:${esc(order.delivery_captain_phone)}">${esc(order.delivery_captain_phone)}</a>` : ""}</p>` : ""}
     </div>
-    <div class="card"><h2 style="margin-top:0">Items</h2><ul>${items || '<li class="muted">No items</li>'}</ul>
-      <div class="row" style="align-items:baseline"><strong style="flex:1">Total</strong><strong style="font-size:17px">${money(order.total)}</strong></div>
-      ${order.payment_status ? `<p class="small" style="margin:8px 0 0">${order.payment_status === "paid" ? "✅ <b>Paid</b>" : "❌ <b>Payment failed</b>"}${order.payment_amount ? " · " + money(order.payment_amount) : ""}${order.payment_payer ? " · " + esc(order.payment_payer) : ""}${order.payment_ref ? ` <span class="muted">(ref ${esc(order.payment_ref)})</span>` : ""}</p>` : `<p class="muted small" style="margin:8px 0 0">Payment: awaiting</p>`}</div>
+    ${itemsCardHtml}
     <div class="card"><h2 style="margin-top:0">Action</h2>${controls}</div>
     <div class="card"><h2 style="margin-top:0">History</h2><ul class="timeline">${(order.events || []).map((e) => `<li>${badge(e.status)} <span class="muted">${fmtDate(e.at)} · ${esc(e.actor)}</span></li>`).join("")}</ul></div>`);
   document.getElementById("back").onclick = dashboard;
@@ -227,8 +245,50 @@ async function orderDetail(id) {
     try { await api(`/api/admin/orders/${encodeURIComponent(id)}/status`, { method: "PATCH", body: { status, agentName, captainPhone } }); orderDetail(id); }
     catch (e) { msg.className = "err"; msg.textContent = e.message === "invalid_transition" ? "That change isn't allowed." : e.message; }
   };
+  // Editable item list (photo/list-order reconciliation) — only at REQUESTED.
+  if (editable) {
+    const box = document.getElementById("edititems");
+    const paint = () => {
+      box.innerHTML = draftItems.length
+        ? draftItems
+            .map((it, idx) => `<div class="summary-line" data-idx="${idx}"><span style="flex:1">${esc(it.name)}</span><div class="qtyctrl"><button type="button" class="qbtn dminus">−</button><input class="qnum dqty" type="number" min="1" value="${it.qty}" style="width:52px" /><button type="button" class="qbtn dplus">+</button></div><button type="button" class="qbtn drm" title="Remove" style="margin-left:6px">✕</button></div>`)
+            .join("")
+        : '<p class="muted small">No items — add at least one before accepting.</p>';
+      box.querySelectorAll(".summary-line").forEach((row) => {
+        const idx = +row.dataset.idx;
+        const num = row.querySelector(".dqty");
+        row.querySelector(".dplus").onclick = () => { draftItems[idx].qty++; paint(); };
+        row.querySelector(".dminus").onclick = () => { draftItems[idx].qty = Math.max(1, draftItems[idx].qty - 1); paint(); };
+        num.onchange = () => { draftItems[idx].qty = Math.max(1, parseInt(num.value, 10) || 1); };
+        row.querySelector(".drm").onclick = () => { draftItems.splice(idx, 1); paint(); };
+      });
+    };
+    paint();
+    document.getElementById("ni_add").onclick = () => {
+      const n = document.getElementById("ni_name"), q = document.getElementById("ni_qty");
+      const name = n.value.trim();
+      if (!name) return;
+      draftItems.push({ name, qty: Math.max(1, parseInt(q.value, 10) || 1) });
+      n.value = ""; q.value = "1"; paint();
+    };
+  }
+
   const acc = document.getElementById("accept");
-  if (acc) { acc.onclick = () => patch("ACCEPTED"); document.getElementById("reject").onclick = () => { if (confirm("Reject this request? Final.")) patch("REJECTED"); }; }
+  if (acc) {
+    acc.onclick = async () => {
+      const imsg = document.getElementById("imsg");
+      if (!draftItems.length) { if (imsg) { imsg.className = "small err"; imsg.textContent = "Add at least one item before accepting."; } return; }
+      try {
+        // Persist the reconciled item list, then accept in one tap.
+        await api(`/api/admin/orders/${encodeURIComponent(id)}/items`, { method: "PATCH", body: { items: draftItems.map((i) => ({ name: i.name, qty: i.qty })) } });
+      } catch (e) {
+        if (imsg) { imsg.className = "small err"; imsg.textContent = e.message === "not_editable" ? "Order already moved on." : e.message; }
+        return;
+      }
+      patch("ACCEPTED");
+    };
+    document.getElementById("reject").onclick = () => { if (confirm("Reject this request? Final.")) patch("REJECTED"); };
+  }
   const save = document.getElementById("save");
   if (save) save.onclick = () => {
     const elc = document.getElementById("agent"); let agentName = "", captainPhone = "";

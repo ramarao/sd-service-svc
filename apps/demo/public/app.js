@@ -263,6 +263,13 @@ async function customerNewOrder(slug, provider) {
     <div class="card">
       <label>Service address</label>
       <div id="addrsection"></div>
+      ${provider.photo_order ? `<div class="photo-order" id="photocard">
+        <strong>📷 Order from a photo or list</strong>
+        <p class="muted small" style="margin:4px 0 8px">Upload a picture of your handwritten list${provider.vertical === "delivery" ? ", prescription" : ""} or the items themselves — we'll read them for you.</p>
+        <input type="file" id="photofile" accept="image/*" />
+        <p id="photostatus" class="small" style="margin:6px 0"></p>
+        <div id="photoitems"></div>
+      </div>` : ""}
       <h2>Items</h2>
       <input id="itemsearch" placeholder="Search items…" style="margin-bottom:8px" />
       ${chipsHtml}
@@ -338,6 +345,61 @@ async function customerNewOrder(slug, provider) {
       applyFilter();
     };
   });
+
+  // ── Photo / list order (Groq vision) ──
+  // Extracted items that match the catalog fill the picker; the rest are kept as
+  // free-text "extra" lines the shop prices on accept.
+  let extraItems = [];
+  const photoFile = document.getElementById("photofile");
+  if (photoFile) {
+    const pstatus = document.getElementById("photostatus");
+    const pitems = document.getElementById("photoitems");
+    const setCatalogQty = (name, qty) => {
+      const row = [...picker.querySelectorAll(".pick-row")].find((r) => r.dataset.name.toLowerCase() === String(name).toLowerCase());
+      if (!row) return false;
+      const num = row.querySelector(".qnum");
+      num.value = Math.max(parseInt(num.value, 10) || 0, qty);
+      row.classList.toggle("picked", (parseInt(num.value, 10) || 0) > 0);
+      return true;
+    };
+    const renderExtras = () => {
+      pitems.innerHTML = extraItems.length
+        ? `<div class="summary-head">From your photo — shop will confirm the price</div>` +
+          extraItems
+            .map((it, i) => `<div class="summary-line"><span>${esc(it.name)} × ${it.qty}${it.note ? ` <span class="muted">(${esc(it.note)})</span>` : ""}</span><button type="button" class="qbtn xrm" data-i="${i}">✕</button></div>`)
+            .join("")
+        : "";
+      pitems.querySelectorAll(".xrm").forEach((b) => (b.onclick = () => { extraItems.splice(+b.dataset.i, 1); renderExtras(); }));
+    };
+    photoFile.onchange = async () => {
+      const f = photoFile.files?.[0];
+      if (!f) return;
+      if (f.size > 6 * 1024 * 1024) { pstatus.className = "small err"; pstatus.textContent = "Image too large (max 6 MB)."; return; }
+      pstatus.className = "small muted"; pstatus.textContent = "Reading your list…";
+      let dataUrl;
+      try { dataUrl = await new Promise((res, rej) => { const rd = new FileReader(); rd.onload = () => res(rd.result); rd.onerror = rej; rd.readAsDataURL(f); }); }
+      catch { pstatus.className = "small err"; pstatus.textContent = "Couldn't read that file."; return; }
+      try {
+        const { items } = await api("/api/my/orders/extract", { method: "POST", body: { slug, image: dataUrl } });
+        const kept = (items || []).filter((it) => it.relevant !== false);
+        const dropped = (items || []).length - kept.length;
+        let matched = 0;
+        extraItems = [];
+        kept.forEach((it) => { if (setCatalogQty(it.name, it.qty)) matched++; else extraItems.push({ name: it.name, qty: it.qty, note: it.note || "" }); });
+        renderExtras();
+        recalc();
+        pstatus.className = "small ok";
+        pstatus.textContent = kept.length
+          ? `Found ${kept.length} item${kept.length === 1 ? "" : "s"} — ${matched} from the menu, ${extraItems.length} extra${dropped ? `, ${dropped} unrelated skipped` : ""}. Review below, then place your request.`
+          : "No matching items found — try a clearer photo or add items manually.";
+      } catch (e) {
+        pstatus.className = "small err";
+        pstatus.textContent = e.message === "groq_not_configured"
+          ? "Photo reading isn't set up for this shop yet — please add items manually."
+          : "Couldn't read that image. Try a clearer photo or add items manually.";
+      }
+    };
+  }
 
   // ── Address book ──
   let bias = null;
@@ -555,7 +617,8 @@ async function customerNewOrder(slug, provider) {
   document.getElementById("submit").onclick = async () => {
     const items = [...picker.querySelectorAll(".pick-row")]
       .map((r) => ({ name: r.dataset.name, qty: Math.max(0, parseInt(r.querySelector(".qnum").value, 10) || 0) }))
-      .filter((i) => i.qty > 0);
+      .filter((i) => i.qty > 0)
+      .concat(extraItems.map((e) => ({ name: e.name, qty: e.qty }))); // photo/list extras (priced by the shop)
     const msg = document.getElementById("msg");
     if (!selectedAddrId) { msg.className = "err"; msg.textContent = "Select or add a service address."; return; }
     if (!items.length) { msg.className = "err"; msg.textContent = "Add at least one item (use + to set quantity)."; return; }

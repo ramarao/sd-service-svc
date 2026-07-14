@@ -131,7 +131,10 @@ export async function deployTown(env, db, target, spec, { dryRun = true } = {}) 
   await cf(target, `/accounts/${acct}/d1/database/${dbId}/query`, { method: "POST", json: { sql: schema } });
   // Idempotent column adds for towns deployed before a schema change (CREATE IF
   // NOT EXISTS won't alter an existing table). Each errors if the column exists.
-  for (const alter of ["ALTER TABLE platform_settings ADD COLUMN wa_phone_number_id TEXT"]) {
+  for (const alter of [
+    "ALTER TABLE platform_settings ADD COLUMN wa_phone_number_id TEXT",
+    "ALTER TABLE service_providers ADD COLUMN photo_order INTEGER NOT NULL DEFAULT 0",
+  ]) {
     try { await cf(target, `/accounts/${acct}/d1/database/${dbId}/query`, { method: "POST", json: { sql: alter } }); } catch { /* already present */ }
   }
 

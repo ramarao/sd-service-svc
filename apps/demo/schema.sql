@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS service_providers (
   wa_phone_number_id TEXT,                       -- WABA phone-number-id (optional white-label override)
   wa_token           TEXT,                       -- optional per-provider access token override
   config             TEXT NOT NULL DEFAULT '{}', -- JSON: labels, currency, template names
+  photo_order        INTEGER NOT NULL DEFAULT 0,  -- 1 = customer can upload a photo/list; Groq extracts items
   upi_id             TEXT,                        -- VPA for collecting payment (e.g. name@okhdfcbank)
   upi_name           TEXT,                        -- payee name shown in the UPI app
   created_at         INTEGER NOT NULL

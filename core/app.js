@@ -10,6 +10,7 @@ import { Hono } from "hono";
 import { setCookie, deleteCookie, getCookie } from "hono/cookie";
 import QRCode from "qrcode";
 import { processPaymentEmail } from "./email.js";
+import { extractItemsFromImage } from "./vision.js";
 import { notifyOrders } from "./orders-hub.js";
 import { allowedTransitions, advanceStep, itemsEditableAt } from "./flow.js";
 import { FLOWS, flowForProvider, flowForVertical, setDefaultVertical } from "./flows/index.js";
@@ -561,12 +562,26 @@ app.get("/api/providers/:slug", async (c) => {
     name: provider.name,
     vertical: provider.vertical || null,
     currency: cfg.currency || "INR",
+    photo_order: provider.photo_order ? 1 : 0, // 1 = customer may upload a photo/list to auto-fill items
     catalog,
     flow: flowForProvider(provider), // the vertical's flow — drives status labels/tracking
   });
 });
 
 // Customer creates an order (must be logged in as customer).
+// Customer uploads a photo/list; Groq reads it into a draft item list they can
+// edit before placing the order. Only offered when the provider has photo_order on.
+app.post("/api/my/orders/extract", requireRole("customer"), async (c) => {
+  const { slug, image } = await c.req.json().catch(() => ({}));
+  const provider = await getProviderBySlug(c.env.DB, slug);
+  if (!provider) return c.json({ error: "unknown_provider" }, 400);
+  if (!provider.photo_order) return c.json({ error: "photo_order_disabled" }, 403);
+  if (!image) return c.json({ error: "no_image" }, 400);
+  const r = await extractItemsFromImage(c.env, c.env.DB, provider, image);
+  if (!r.ok) return c.json({ error: r.error || "extract_failed" }, 400);
+  return c.json({ ok: true, items: r.items });
+});
+
 app.post("/api/my/orders", requireRole("customer"), async (c) => {
   const sess = c.get("session");
   const { slug, address, lat, lng, address_id, items, note } = await c.req.json().catch(() => ({}));
@@ -828,6 +843,22 @@ app.patch("/api/admin/orders/:id/status", requireRole("admin", "super_admin", "m
   } catch (e) {
     return c.json({ error: e.message }, 400);
   }
+});
+
+// Manager/admin reconciles the item list before accepting a photo/list order —
+// keep/delete/adjust what Groq extracted. Only while still REQUESTED (pre-accept).
+app.patch("/api/admin/orders/:id/items", requireRole("admin", "super_admin", "manager"), async (c) => {
+  const sess = c.get("session");
+  const { items } = await c.req.json().catch(() => ({}));
+  const order = await getOrder(c.env.DB, c.req.param("id"));
+  if (!order) return c.json({ error: "not_found" }, 404);
+  const scope = providerScope(sess);
+  if (sess.role !== "super_admin" && !scope) return c.json({ error: "forbidden" }, 403);
+  if (scope && order.provider_id !== scope) return c.json({ error: "forbidden" }, 403);
+  if (order.status !== "REQUESTED") return c.json({ error: "not_editable" }, 409);
+  if (!Array.isArray(items) || items.length === 0) return c.json({ error: "no_items" }, 400);
+  await replaceOrderItems(c.env.DB, order.id, order.provider_id, items);
+  return c.json({ ok: true, order: await getOrder(c.env.DB, order.id) });
 });
 
 // ── Captains roster (super-admin or provider manager) ────────────────────────
@@ -1163,16 +1194,16 @@ app.post("/api/control/verticals", requireControlToken, async (c) => {
 
 // Providers.
 app.get("/api/control/providers", requireControlToken, async (c) => {
-  const { results } = await c.env.DB.prepare("SELECT id, slug, name, vertical, upi_id, upi_name FROM service_providers ORDER BY vertical, name").all();
+  const { results } = await c.env.DB.prepare("SELECT id, slug, name, vertical, photo_order, upi_id, upi_name FROM service_providers ORDER BY vertical, name").all();
   return c.json({ providers: results || [] });
 });
 app.post("/api/control/providers", requireControlToken, async (c) => {
-  const { slug, name, vertical, upi_id, upi_name } = await c.req.json().catch(() => ({}));
+  const { slug, name, vertical, photo_order, upi_id, upi_name } = await c.req.json().catch(() => ({}));
   if (!slug || !name || !vertical) return c.json({ error: "missing" }, 400);
   const id = randomId();
   try {
-    await c.env.DB.prepare("INSERT INTO service_providers (id, slug, name, vertical, config, upi_id, upi_name, created_at) VALUES (?,?,?,?,?,?,?,?)")
-      .bind(id, slug, name, vertical, "{}", upi_id || null, upi_name || null, now()).run();
+    await c.env.DB.prepare("INSERT INTO service_providers (id, slug, name, vertical, photo_order, config, upi_id, upi_name, created_at) VALUES (?,?,?,?,?,?,?,?,?)")
+      .bind(id, slug, name, vertical, photo_order ? 1 : 0, "{}", upi_id || null, upi_name || null, now()).run();
   } catch (e) {
     return c.json({ error: "slug_taken_or_invalid", detail: String(e) }, 400);
   }
@@ -1182,10 +1213,11 @@ app.patch("/api/control/providers/:id", requireControlToken, async (c) => {
   const cur = await getProvider(c.env.DB, c.req.param("id"));
   if (!cur) return c.json({ error: "not_found" }, 404);
   const b = await c.req.json().catch(() => ({}));
-  await c.env.DB.prepare("UPDATE service_providers SET name=?, vertical=?, upi_id=?, upi_name=? WHERE id=?")
+  await c.env.DB.prepare("UPDATE service_providers SET name=?, vertical=?, photo_order=?, upi_id=?, upi_name=? WHERE id=?")
     .bind(
       b.name?.trim() || cur.name,
       b.vertical || cur.vertical,
+      b.photo_order !== undefined ? (b.photo_order ? 1 : 0) : (cur.photo_order || 0),
       b.upi_id !== undefined ? b.upi_id || null : cur.upi_id,
       b.upi_name !== undefined ? b.upi_name || null : cur.upi_name,
       cur.id

@@ -253,6 +253,10 @@ async function providerDetail(townId, p) {
       <label style="margin-top:8px">Vertical</label>
       <select id="p_vertical">${(verts.verticals || []).map((x) => `<option value="${esc(x.slug)}" ${x.slug === p.vertical ? "selected" : ""}>${esc(x.name)}</option>`).join("") || `<option value="${esc(p.vertical || "")}">${esc(p.vertical || "—")}</option>`}</select>
       <label style="margin-top:8px">UPI ID</label><input id="p_upi" value="${esc(p.upi_id || "")}" placeholder="shop@upi" />
+      <label class="row" style="margin-top:12px;gap:8px;align-items:center;cursor:pointer">
+        <input type="checkbox" id="p_photo" ${p.photo_order ? "checked" : ""} style="width:auto;margin:0" />
+        <span>Photo / list upload <span class="muted small">— customer can send a picture or item list; Groq reads it and pre-fills the order</span></span>
+      </label>
       <div class="row" style="margin-top:12px;gap:8px"><button class="grow0" id="psave">Save</button><button class="ghost grow0" id="pdel">Delete provider</button></div>
       <p id="pmsg"></p>
     </div>
@@ -292,7 +296,7 @@ async function providerDetail(townId, p) {
 
   document.getElementById("psave").onclick = async () => {
     const msg = document.getElementById("pmsg");
-    try { await api(A(""), { method: "PATCH", body: { name: v("p_name"), vertical: v("p_vertical"), upi_id: v("p_upi") } }); msg.className = "small"; msg.textContent = "Saved ✓"; }
+    try { await api(A(""), { method: "PATCH", body: { name: v("p_name"), vertical: v("p_vertical"), upi_id: v("p_upi"), photo_order: document.getElementById("p_photo").checked } }); msg.className = "small"; msg.textContent = "Saved ✓"; }
     catch (e) { msg.className = "err"; msg.textContent = e.message; }
   };
   document.getElementById("pdel").onclick = async () => {

@@ -514,3 +514,14 @@ ol.steps li { margin: 8px 0; }
 /* ── Paid pill (order lists) ── */
 .paid-pill { font-size: 12px; font-weight: 700; padding: 1px 8px; border-radius: 999px; background: var(--st-green-bg); color: var(--st-green-fg); margin-right: 8px; white-space: nowrap; }
 .paid-pill.fail { background: var(--st-red-bg); color: var(--st-red-fg); }
+
+/* Photo/list order (Groq vision) upload block on the customer order form. */
+.photo-order {
+  border: 1px dashed var(--border-strong);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+  padding: 12px;
+  margin: 12px 0;
+}
+.photo-order input[type="file"] { font-size: 13px; }
+.photo-order .summary-line .xrm { padding: 0 8px; line-height: 1.6; }
