@@ -292,11 +292,13 @@ async function customerNewOrder(slug, provider) {
 
   // ── Items picker (multi-select with quantity) ──
   const picker = document.getElementById("picker");
-  // Photo/list uploads: one entry per image, each carrying the items read from it,
-  // so deleting an image cleanly removes exactly its items. Priced items count
-  // toward the total; unpriced (non-catalog) ones are settled by the shop.
-  let photoImages = [];
-  const photoSum = () => photoImages.reduce((s, im) => s + im.items.reduce((a, it) => a + (it.price || 0) * it.qty, 0), 0);
+  // Photo/list uploads. Items are merged by name into a single list (no duplicate
+  // rows across images); each item tracks the ids of the images it came from, so an
+  // item survives while any of its source images remain and drops when the last one
+  // is deleted. Priced items count toward the total; unpriced ones the shop settles.
+  let photoImages = []; // [{ id, thumb }]
+  let photoItems = [];  // [{ name, qty, price, note, imgIds:[] }]
+  const photoSum = () => photoItems.reduce((s, it) => s + (it.price || 0) * it.qty, 0);
   const recalc = () => {
     let sum = 0;
     const selected = [];
@@ -384,26 +386,44 @@ async function customerNewOrder(slug, provider) {
       rd.readAsDataURL(file);
     });
 
-    // Flat, per-image-tagged item list (each line knows its source image → delete
-    // an image removes exactly its items). Priced items also show in the total.
+    let photoSeq = 0;
+    // Merge an extracted item into the shared list by name (case-insensitive):
+    // sum the quantity and remember which image contributed it.
+    const mergeItem = (imgId, raw) => {
+      const key = raw.name.trim().toLowerCase();
+      if (!key) return;
+      const existing = photoItems.find((it) => it.name.toLowerCase() === key);
+      if (existing) {
+        existing.qty += raw.qty;
+        if (!existing.imgIds.includes(imgId)) existing.imgIds.push(imgId);
+        if (!existing.note && raw.note) existing.note = raw.note;
+      } else {
+        photoItems.push({ name: raw.name.trim(), qty: raw.qty, price: priceOf.get(key) || 0, note: raw.note || "", imgIds: [imgId] });
+      }
+    };
+    // Delete an image: forget it as a source for every item; an item stays while it
+    // still has another source image and is dropped once its last source is gone.
+    const removeImage = (id) => {
+      photoImages = photoImages.filter((im) => im.id !== id);
+      photoItems = photoItems.filter((it) => { it.imgIds = it.imgIds.filter((x) => x !== id); return it.imgIds.length > 0; });
+      renderPhotos(); recalc();
+    };
+
     const renderPhotos = () => {
       pthumbs.innerHTML = photoImages
-        .map((im, i) => `<div class="pthumb"><img src="${im.thumb}" alt="photo ${i + 1}" /><button type="button" class="pthumb-x" data-img="${i}" title="Remove photo &amp; its items">✕</button></div>`)
+        .map((im, i) => `<div class="pthumb"><img src="${im.thumb}" alt="photo ${i + 1}" /><button type="button" class="pthumb-x" data-id="${im.id}" title="Remove photo &amp; its items">✕</button></div>`)
         .join("");
-      pthumbs.querySelectorAll(".pthumb-x").forEach((b) => (b.onclick = () => { photoImages.splice(+b.dataset.img, 1); renderPhotos(); recalc(); }));
-      const rows = [];
-      photoImages.forEach((im, ii) => im.items.forEach((it, ji) => rows.push({ ii, ji, it })));
-      pitems.innerHTML = rows.length
+      pthumbs.querySelectorAll(".pthumb-x").forEach((b) => (b.onclick = () => removeImage(b.dataset.id)));
+      pitems.innerHTML = photoItems.length
         ? `<div class="summary-head">Items from your photos</div>` +
-          rows.map(({ ii, ji, it }) => `<div class="summary-line" data-ii="${ii}" data-ji="${ji}"><span style="flex:1">${esc(it.name)}${photoImages.length > 1 ? ` <span class="muted">📷${ii + 1}</span>` : ""}${it.price ? "" : ` <span class="muted">· shop prices</span>`}${it.note ? ` <span class="muted">(${esc(it.note)})</span>` : ""}</span><div class="qtyctrl"><button type="button" class="qbtn iminus">−</button><input class="qnum iqty" type="number" min="1" value="${it.qty}" inputmode="numeric" /><button type="button" class="qbtn iplus">+</button></div><button type="button" class="qbtn xrm" title="Remove item">✕</button></div>`).join("")
+          photoItems.map((it, i) => `<div class="summary-line" data-i="${i}"><span style="flex:1">${esc(it.name)}${it.price ? "" : ` <span class="muted">· shop prices</span>`}${it.note ? ` <span class="muted">(${esc(it.note)})</span>` : ""}</span><div class="qtyctrl"><button type="button" class="qbtn iminus">−</button><input class="qnum iqty" type="number" min="1" value="${it.qty}" inputmode="numeric" /><button type="button" class="qbtn iplus">+</button></div><button type="button" class="qbtn xrm" title="Remove item">✕</button></div>`).join("")
         : "";
       pitems.querySelectorAll(".summary-line").forEach((row) => {
-        const ii = +row.dataset.ii, ji = +row.dataset.ji, num = row.querySelector(".iqty");
-        const it = photoImages[ii].items[ji];
+        const i = +row.dataset.i, num = row.querySelector(".iqty"), it = photoItems[i];
         row.querySelector(".iplus").onclick = () => { it.qty++; renderPhotos(); recalc(); };
         row.querySelector(".iminus").onclick = () => { it.qty = Math.max(1, it.qty - 1); renderPhotos(); recalc(); };
         num.onchange = () => { it.qty = Math.max(1, parseInt(num.value, 10) || 1); recalc(); };
-        row.querySelector(".xrm").onclick = () => { photoImages[ii].items.splice(ji, 1); renderPhotos(); recalc(); };
+        row.querySelector(".xrm").onclick = () => { photoItems.splice(i, 1); renderPhotos(); recalc(); };
       });
     };
 
@@ -417,9 +437,11 @@ async function customerNewOrder(slug, provider) {
         const { items } = await api("/api/my/orders/extract", { method: "POST", body: { slug, image: thumb } });
         const kept = (items || []).filter((it) => it.relevant !== false);
         const dropped = (items || []).length - kept.length;
-        // Keep the image regardless (shown on the order for the shop to read); attach
-        // whatever items we recognised, priced from the catalog when they match.
-        photoImages.push({ thumb, items: kept.map((it) => ({ name: it.name, qty: it.qty, price: priceOf.get(String(it.name).toLowerCase()) || 0, note: it.note || "" })) });
+        // Keep the image regardless (shown on the order for the shop to read); merge
+        // its items into the shared list, deduped by name.
+        const imgId = "img" + ++photoSeq;
+        photoImages.push({ id: imgId, thumb });
+        kept.forEach((it) => mergeItem(imgId, { name: it.name, qty: it.qty, note: it.note || "" }));
         renderPhotos(); recalc();
         pstatus.className = "small ok";
         pstatus.textContent = kept.length
@@ -654,7 +676,7 @@ async function customerNewOrder(slug, provider) {
     const items = [...picker.querySelectorAll(".pick-row")]
       .map((r) => ({ name: r.dataset.name, qty: Math.max(0, parseInt(r.querySelector(".qnum").value, 10) || 0) }))
       .filter((i) => i.qty > 0)
-      .concat(photoImages.flatMap((im) => im.items.map((it) => ({ name: it.name, qty: it.qty })))); // items read from the photos
+      .concat(photoItems.map((it) => ({ name: it.name, qty: it.qty }))); // items read from the photos (merged by name)
     const images = photoImages.map((im) => im.thumb);
     const msg = document.getElementById("msg");
     if (!selectedAddrId) { msg.className = "err"; msg.textContent = "Select or add a service address."; return; }
