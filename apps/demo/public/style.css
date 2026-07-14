@@ -550,3 +550,7 @@ ol.steps li { margin: 8px 0; }
   border-radius: 50%; border: none; padding: 0; cursor: pointer;
   background: rgba(0, 0, 0, 0.6); color: #fff; font-size: 11px; line-height: 20px;
 }
+
+/* Out-of-stock catalog items — greyed on the order form + manager list. */
+.pick-row.pick-off { opacity: 0.5; }
+.order-line.item-off { opacity: 0.6; }

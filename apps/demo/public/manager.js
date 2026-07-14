@@ -313,12 +313,15 @@ async function tabItems() {
   const groups = {};
   catalog.forEach((c) => { const g = c.category || "Uncategorised"; (groups[g] = groups[g] || []).push(c); });
   const rows = Object.keys(groups).sort().map((g) =>
-    `<div class="pick-cat">${esc(g)}</div>` + groups[g].map((c) =>
-      `<div class="order-line"><div><strong>${esc(c.name)}</strong> <span class="amt">${money(c.price)}</span><br><span class="muted">${esc(c.unit || "")}</span></div>
-       <div class="row grow0" style="gap:6px"><button class="ghost small edit" data-id="${c.id}">Edit</button><button class="ghost small del" data-id="${c.id}" data-name="${esc(c.name)}">✕</button></div></div>`).join("")).join("");
+    `<div class="pick-cat">${esc(g)}</div>` + groups[g].map((c) => {
+      const off = c.available === 0;
+      return `<div class="order-line${off ? " item-off" : ""}"><div><strong>${esc(c.name)}</strong> <span class="amt">${money(c.price)}</span>${off ? ` <span class="badge REJECTED">out of stock</span>` : ""}<br><span class="muted">${esc(c.unit || "")}</span></div>
+       <div class="row grow0" style="gap:6px"><button class="ghost small avail" data-id="${c.id}" data-on="${off ? 0 : 1}">${off ? "Mark in stock" : "Mark out"}</button><button class="ghost small edit" data-id="${c.id}">Edit</button><button class="ghost small del" data-id="${c.id}" data-name="${esc(c.name)}">✕</button></div></div>`;
+    }).join("")).join("");
   content().innerHTML = `<div class="row" style="justify-content:space-between;align-items:center;margin-bottom:10px"><h2 style="margin:0">Items</h2><button class="small grow0" id="add">+ Add item</button></div>${rows || '<p class="muted">No items yet.</p>'}`;
   document.getElementById("add").onclick = () => itemModal(null, categories, catalog);
   content().querySelectorAll(".edit").forEach((b) => (b.onclick = () => itemModal(catalog.find((c) => c.id === b.dataset.id), categories, catalog)));
+  content().querySelectorAll(".avail").forEach((b) => (b.onclick = async () => { await api(`/api/console/providers/${pid()}/catalog/${b.dataset.id}`, { method: "PATCH", body: { available: b.dataset.on === "0" } }); tabItems(); }));
   content().querySelectorAll(".del").forEach((b) => (b.onclick = async () => { if (!confirm(`Delete "${b.dataset.name}"?`)) return; await api(`/api/console/providers/${pid()}/catalog/${b.dataset.id}`, { method: "DELETE" }); tabItems(); }));
 }
 function itemModal(item, categories, catalog) {

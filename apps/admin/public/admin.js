@@ -320,7 +320,7 @@ async function providerDetail(townId, p) {
 
     <div class="card">
       <h2 style="margin-top:0">Catalog</h2>
-      ${list(cat.catalog || [], (i) => `<div class="order-line"><div><strong>${esc(i.name)}</strong> <span class="muted small">${esc(i.category || "")}</span><br><span class="muted small">${money(i.price)} · ${esc(i.unit || "piece")}</span></div><button class="ghost small deli" data-iid="${esc(i.id)}" data-name="${esc(i.name)}">✕</button></div>`, "No items yet — customers can't order without these.")}
+      ${list(cat.catalog || [], (i) => { const off = i.available === 0; return `<div class="order-line"><div><strong>${esc(i.name)}</strong> <span class="muted small">${esc(i.category || "")}</span>${off ? ` <span class="badge REJECTED">out of stock</span>` : ""}<br><span class="muted small">${money(i.price)} · ${esc(i.unit || "piece")}</span></div><div class="row grow0" style="gap:6px"><button class="ghost small avail" data-iid="${esc(i.id)}" data-on="${off ? 0 : 1}">${off ? "In stock" : "Out"}</button><button class="ghost small deli" data-iid="${esc(i.id)}" data-name="${esc(i.name)}">✕</button></div></div>`; }, "No items yet — customers can't order without these.")}
       <div class="row" style="gap:6px;margin-top:10px;align-items:flex-end">
         <div style="flex:1"><label>Item</label><input id="i_name" placeholder="Shirt" /></div>
         <div style="flex:1"><label>Category</label><input id="i_cat" placeholder="Wash & Iron" /></div>
@@ -355,6 +355,7 @@ async function providerDetail(townId, p) {
   };
   el.querySelectorAll(".delm").forEach((b) => (b.onclick = async () => { if (confirm(`Remove manager "${b.dataset.name}"?`)) { await api(A(`/managers/${b.dataset.mid}`), { method: "DELETE" }); providerDetail(townId, p); } }));
   el.querySelectorAll(".delc").forEach((b) => (b.onclick = async () => { if (confirm(`Remove captain "${b.dataset.name}"?`)) { await api(A(`/captains/${b.dataset.cid}`), { method: "DELETE" }); providerDetail(townId, p); } }));
+  el.querySelectorAll(".avail").forEach((b) => (b.onclick = async () => { await api(A(`/catalog/${b.dataset.iid}`), { method: "PATCH", body: { available: b.dataset.on === "0" } }); providerDetail(townId, p); }));
   el.querySelectorAll(".deli").forEach((b) => (b.onclick = async () => { if (confirm(`Delete item "${b.dataset.name}"?`)) { await api(A(`/catalog/${b.dataset.iid}`), { method: "DELETE" }); providerDetail(townId, p); } }));
 }
 

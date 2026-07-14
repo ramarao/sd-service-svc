@@ -333,14 +333,18 @@ export async function createOrder(db, { providerId, customerId, address, lat, ln
   // Resolve unit prices from the provider's catalog (authoritative — never trust
   // a client-sent price). Matched case-insensitively by item name.
   const { results: catalog } = await db
-    .prepare("SELECT name, price FROM catalog_items WHERE provider_id = ?")
+    .prepare("SELECT name, price, available FROM catalog_items WHERE provider_id = ? AND active = 1")
     .bind(providerId)
     .all();
   const priceOf = new Map((catalog || []).map((c) => [String(c.name).toLowerCase(), c.price || 0]));
+  // Catalog items marked out-of-stock can't be ordered even if a client bypasses
+  // the greyed-out UI. Non-catalog items (photo/list extras) aren't gated.
+  const unavailable = new Set((catalog || []).filter((c) => c.available === 0).map((c) => String(c.name).toLowerCase()));
 
   const stmts = [];
   for (const it of items || []) {
     if (!it?.name) continue;
+    if (unavailable.has(String(it.name).toLowerCase())) continue; // drop out-of-stock catalog items
     const qty = Math.max(1, parseInt(it.qty, 10) || 1);
     const unit = priceOf.get(String(it.name).toLowerCase()) ?? 0;
     stmts.push(

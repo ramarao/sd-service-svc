@@ -56,7 +56,8 @@ CREATE TABLE IF NOT EXISTS catalog_items (
   category    TEXT,                   -- e.g. 'Wash & Iron', 'Dry Clean'
   unit        TEXT NOT NULL DEFAULT 'piece',
   price       INTEGER DEFAULT 0,      -- minor units (paise), optional
-  active      INTEGER NOT NULL DEFAULT 1
+  active      INTEGER NOT NULL DEFAULT 1,   -- 0 = removed/hidden from the catalog
+  available   INTEGER NOT NULL DEFAULT 1    -- 0 = in catalog but out of stock (greyed, not orderable)
 );
 CREATE INDEX IF NOT EXISTS idx_catalog_provider ON catalog_items(provider_id);
 

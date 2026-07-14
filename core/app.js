@@ -440,7 +440,7 @@ app.get("/api/captain/orders/:id", requireRole("captain"), async (c) => {
     order.customer_phone = order.customer_phone || cust?.wa_phone || null;
   }
   const { results: catalog } = await c.env.DB.prepare(
-    "SELECT name, category, unit, price FROM catalog_items WHERE provider_id = ? AND active = 1 ORDER BY category, name"
+    "SELECT name, category, unit, price, available FROM catalog_items WHERE provider_id = ? AND active = 1 ORDER BY category, name"
   )
     .bind(order.provider_id)
     .all();
@@ -592,7 +592,7 @@ app.get("/api/providers/:slug", async (c) => {
   const provider = await getProviderBySlug(c.env.DB, c.req.param("slug"));
   if (!provider) return c.json({ error: "not_found" }, 404);
   const { results: catalog } = await c.env.DB.prepare(
-    "SELECT id, name, category, unit, price FROM catalog_items WHERE provider_id = ? AND active = 1 ORDER BY category, name"
+    "SELECT id, name, category, unit, price, available FROM catalog_items WHERE provider_id = ? AND active = 1 ORDER BY category, name"
   )
     .bind(provider.id)
     .all();
@@ -1155,8 +1155,9 @@ app.patch("/api/console/providers/:id/catalog/:itemId", requireRole("super_admin
   const unit = body.unit?.trim() || cur.unit;
   const price = body.price !== undefined ? Math.max(0, parseInt(body.price, 10) || 0) : cur.price;
   const active = body.active !== undefined ? (body.active ? 1 : 0) : cur.active;
-  await c.env.DB.prepare("UPDATE catalog_items SET name = ?, category = ?, unit = ?, price = ?, active = ? WHERE id = ?")
-    .bind(name, category, unit, price, active, cur.id)
+  const available = body.available !== undefined ? (body.available ? 1 : 0) : (cur.available ?? 1);
+  await c.env.DB.prepare("UPDATE catalog_items SET name = ?, category = ?, unit = ?, price = ?, active = ?, available = ? WHERE id = ?")
+    .bind(name, category, unit, price, active, available, cur.id)
     .run();
   await ensureCategory(c.env.DB, c.req.param("id"), category);
   return c.json({ ok: true });
@@ -1300,8 +1301,23 @@ app.patch("/api/control/providers/:id", requireControlToken, async (c) => {
 
 // Catalog per provider.
 app.get("/api/control/providers/:id/catalog", requireControlToken, async (c) => {
-  const { results } = await c.env.DB.prepare("SELECT id, name, category, unit, price, active FROM catalog_items WHERE provider_id = ? ORDER BY category, name").bind(c.req.param("id")).all();
+  const { results } = await c.env.DB.prepare("SELECT id, name, category, unit, price, active, available FROM catalog_items WHERE provider_id = ? ORDER BY category, name").bind(c.req.param("id")).all();
   return c.json({ catalog: results || [] });
+});
+app.patch("/api/control/providers/:id/catalog/:itemId", requireControlToken, async (c) => {
+  const b = await c.req.json().catch(() => ({}));
+  const cur = await c.env.DB.prepare("SELECT * FROM catalog_items WHERE id = ? AND provider_id = ?").bind(c.req.param("itemId"), c.req.param("id")).first();
+  if (!cur) return c.json({ error: "not_found" }, 404);
+  await c.env.DB.prepare("UPDATE catalog_items SET name=?, category=?, unit=?, price=?, available=? WHERE id=?")
+    .bind(
+      b.name?.trim() || cur.name,
+      b.category !== undefined ? (b.category?.trim() || null) : cur.category,
+      b.unit?.trim() || cur.unit,
+      b.price !== undefined ? Math.max(0, parseInt(b.price, 10) || 0) : cur.price,
+      b.available !== undefined ? (b.available ? 1 : 0) : (cur.available ?? 1),
+      cur.id
+    ).run();
+  return c.json({ ok: true });
 });
 app.post("/api/control/providers/:id/catalog", requireControlToken, async (c) => {
   const { name, category, unit, price } = await c.req.json().catch(() => ({}));

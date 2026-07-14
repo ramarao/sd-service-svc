@@ -151,6 +151,7 @@ app.delete("/api/towns/:id/providers/:pid", requireRole("super_admin"), (c) => p
 // Catalog.
 app.get("/api/towns/:id/providers/:pid/catalog", requireRole("super_admin"), (c) => proxyTown(c, `/api/control/providers/${P(c)}/catalog`));
 app.post("/api/towns/:id/providers/:pid/catalog", requireRole("super_admin"), (c) => proxyTown(c, `/api/control/providers/${P(c)}/catalog`));
+app.patch("/api/towns/:id/providers/:pid/catalog/:itemId", requireRole("super_admin"), (c) => proxyTown(c, `/api/control/providers/${P(c)}/catalog/${c.req.param("itemId")}`));
 app.delete("/api/towns/:id/providers/:pid/catalog/:itemId", requireRole("super_admin"), (c) => proxyTown(c, `/api/control/providers/${P(c)}/catalog/${c.req.param("itemId")}`));
 // Managers (admin numbers) + captains (field agents).
 app.get("/api/towns/:id/providers/:pid/managers", requireRole("super_admin"), (c) => proxyTown(c, `/api/control/providers/${P(c)}/managers`));

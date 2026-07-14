@@ -231,16 +231,17 @@ async function customerNewOrder(slug, provider) {
     .map(
       (g) => `<div class="pick-cat">${esc(g)}</div>` +
         catGroups[g]
-          .map(
-            (ci) => `<div class="pick-row" data-name="${esc(ci.name)}" data-cat="${esc(g)}" data-price="${ci.price || 0}">
-              <div class="pick-info"><strong>${esc(ci.name)}</strong><br><span class="muted">${money(ci.price || 0, cur)} · ${esc(ci.unit)}</span></div>
-              <div class="qtyctrl">
+          .map((ci) => {
+            const off = ci.available === 0;
+            return `<div class="pick-row${off ? " pick-off" : ""}" data-name="${esc(ci.name)}" data-cat="${esc(g)}" data-price="${ci.price || 0}">
+              <div class="pick-info"><strong>${esc(ci.name)}</strong>${off ? ` <span class="muted small">· out of stock</span>` : ""}<br><span class="muted">${money(ci.price || 0, cur)} · ${esc(ci.unit)}</span></div>
+              ${off ? "" : `<div class="qtyctrl">
                 <button type="button" class="qbtn qminus">−</button>
                 <input class="qnum" type="number" min="0" value="0" inputmode="numeric" />
                 <button type="button" class="qbtn qplus">+</button>
-              </div>
-            </div>`
-          )
+              </div>`}
+            </div>`;
+          })
           .join("")
     )
     .join("");
@@ -303,8 +304,10 @@ async function customerNewOrder(slug, provider) {
     let sum = 0;
     const selected = [];
     picker.querySelectorAll(".pick-row").forEach((r) => {
+      const numEl = r.querySelector(".qnum");
+      if (!numEl) return; // out-of-stock row — no stepper, not orderable
       const price = parseInt(r.dataset.price || "0", 10);
-      const qty = Math.max(0, parseInt(r.querySelector(".qnum").value, 10) || 0);
+      const qty = Math.max(0, parseInt(numEl.value, 10) || 0);
       if (qty > 0) selected.push({ name: r.dataset.name, cat: r.dataset.cat, qty, price });
       sum += price * qty;
     });
@@ -328,6 +331,7 @@ async function customerNewOrder(slug, provider) {
   };
   picker.querySelectorAll(".pick-row").forEach((r) => {
     const num = r.querySelector(".qnum");
+    if (!num) return; // out-of-stock row — nothing to wire
     const mark = () => r.classList.toggle("picked", (parseInt(num.value, 10) || 0) > 0);
     r.querySelector(".qplus").onclick = () => { num.value = (parseInt(num.value, 10) || 0) + 1; mark(); recalc(); };
     r.querySelector(".qminus").onclick = () => { num.value = Math.max(0, (parseInt(num.value, 10) || 0) - 1); mark(); recalc(); };
@@ -677,7 +681,7 @@ async function customerNewOrder(slug, provider) {
 
   document.getElementById("submit").onclick = async () => {
     const items = [...picker.querySelectorAll(".pick-row")]
-      .map((r) => ({ name: r.dataset.name, qty: Math.max(0, parseInt(r.querySelector(".qnum").value, 10) || 0) }))
+      .map((r) => ({ name: r.dataset.name, qty: Math.max(0, parseInt(r.querySelector(".qnum")?.value, 10) || 0) }))
       .filter((i) => i.qty > 0)
       // items read from the photos (merged by name); carry the written weight into the
       // name for shop-priced items so the shop sees "Toor dal (3 kg)" on the order.
