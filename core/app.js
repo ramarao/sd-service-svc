@@ -309,7 +309,11 @@ app.post("/auth/logout", (c) => {
 // "login". Tapping it logs them straight in for their verified number.
 app.get("/auth/captain/wa/:token", async (c) => {
   const claims = await verifyLinkToken(c.env, c.req.param("token"));
-  if (!claims?.cap || !claims.ph) return c.redirect("/captain");
+  if (!claims?.cap || !claims.ph) {
+    const sess = await readSession(c.env, getCookie(c, COOKIE_NAME));
+    if (sess?.role === "captain") return c.redirect("/captain");
+    return c.redirect("/auth/expired?role=captain");
+  }
   const providers = await getCaptainProviders(c.env.DB, claims.ph);
   if (!providers.length) return c.redirect("/captain"); // no longer a captain
   const name = await captainName(c.env.DB, claims.ph);
@@ -330,7 +334,11 @@ app.get("/auth/captain/wa-login/info", async (c) => {
 // ── Manager auth — WhatsApp-only, mirrors captains (no passwords) ─────────────
 app.get("/auth/manager/wa/:token", async (c) => {
   const claims = await verifyLinkToken(c.env, c.req.param("token"));
-  if (!claims?.mgr || !claims.ph) return c.redirect("/manager");
+  if (!claims?.mgr || !claims.ph) {
+    const sess = await readSession(c.env, getCookie(c, COOKIE_NAME));
+    if (sess?.role === "manager") return c.redirect("/manager");
+    return c.redirect("/auth/expired?role=manager");
+  }
   const providers = await getManagerProviders(c.env.DB, claims.ph);
   if (!providers.length) return c.redirect("/manager"); // no longer a manager
   const name = await managerName(c.env.DB, claims.ph);
@@ -344,6 +352,36 @@ app.get("/auth/manager/wa-login/info", async (c) => {
   const number = (s?.wa_display_number || "").replace(/[^\d]/g, "") || null;
   const message = "admin";
   return c.json({ number, message, waLink: number ? `https://wa.me/${number}?text=${encodeURIComponent(message)}` : null });
+});
+
+// Shared "link expired" landing. A WhatsApp magic link is only valid for ~1 hour
+// (it's a bearer credential); once it lapses and there's no live session, every
+// WhatsApp-opened page lands here so the user can get a fresh link in one tap
+// instead of hitting a blank/login page. role → the keyword that mints a new link.
+// Under /auth/* so it runs the Worker first (not the static-asset SPA fallback).
+app.get("/auth/expired", async (c) => {
+  const role = c.req.query("role") || "customer";
+  const keyword = role === "captain" ? "capt" : role === "manager" ? "admin" : "hi";
+  const esc = (s) => String(s || "").replace(/[&<>"]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[ch]));
+  const brand = c.get("config")?.brand?.name || "Store";
+  const s = await getSettings(c.env.DB);
+  const number = (s?.wa_display_number || "").replace(/[^\d]/g, "");
+  const waLink = number ? `https://wa.me/${number}?text=${encodeURIComponent(keyword)}` : null;
+  const cta = waLink
+    ? `<a href="${waLink}" style="display:inline-block;margin-top:16px;padding:13px 22px;border-radius:10px;background:var(--accent);color:#fff;text-decoration:none;font-weight:600">📲 Open WhatsApp</a>`
+    : `<p style="margin-top:14px">Send "<b>${esc(keyword)}</b>" to our WhatsApp number to get a new link.</p>`;
+  const html =
+    `<!doctype html><html lang="en"><head><meta charset="utf-8"/>` +
+    `<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>` +
+    `<title>Link expired — ${esc(brand)}</title><link rel="stylesheet" href="/style.css"/></head>` +
+    `<body><div id="app" style="max-width:460px;margin:0 auto;padding:24px">` +
+    `<div class="card" style="text-align:center">` +
+    `<div style="font-size:46px;line-height:1">⏰</div>` +
+    `<h1 style="margin:10px 0 4px">Link expired</h1>` +
+    `<p class="muted">For your security this link only works for a short while. Tap below to get a fresh one on WhatsApp — you'll be signed in automatically.</p>` +
+    cta +
+    `</div></div></body></html>`;
+  return c.html(html);
 });
 
 // Who am I + which providers I manage (with my tier at each).
@@ -521,8 +559,11 @@ app.post("/api/account/password", requireRole("admin", "super_admin"), async (c)
 app.get("/auth/wa/:token", async (c) => {
   const claims = await verifyLinkToken(c.env, c.req.param("token"));
   if (!claims) {
-    // Expired/invalid → fall back to the normal (OTP) app entry.
-    return c.redirect(claims?.slug ? `/${claims.slug}/app` : "/");
+    // Expired/invalid link. If they still have a live session cookie, let them
+    // through; otherwise send them back to WhatsApp for a fresh link.
+    const sess = await readSession(c.env, getCookie(c, COOKIE_NAME));
+    if (sess?.role === "customer") return c.redirect("/start");
+    return c.redirect("/auth/expired?role=customer");
   }
   const session = await issueSession(c.env, {
     role: "customer",
