@@ -283,9 +283,11 @@ async function providerDetail(townId, p) {
   ]);
   const list = (rows, render, empty) => rows.length ? rows.map(render).join("") : `<p class="muted small">${empty}</p>`;
   // Fulfilment (delivery/courier) only applies to flows that deliver to the customer.
-  // On-site flows (appliance/plumber) have no delivery step → not applicable.
+  // Courier flows already ship by courier; on-site flows (appliance) have no dispatch.
   const provFlow = (verts.verticals || []).find((x) => x.slug === p.vertical)?.flow;
-  const flowDelivers = (flowsR.flows || []).find((f) => f.key === provFlow)?.delivers !== false;
+  const flowMeta = (flowsR.flows || []).find((f) => f.key === provFlow);
+  const flowDelivers = flowMeta?.delivers !== false && !flowMeta?.courier;
+  const flowCourier = !!flowMeta?.courier;
   document.getElementById("body").innerHTML = `
     <div class="card">
       <label>Name</label><input id="p_name" value="${esc(p.name)}" />
@@ -297,6 +299,8 @@ async function providerDetail(townId, p) {
       ${flowDelivers
         ? `<label style="margin-top:8px">Fulfilment <span class="muted small">— how orders leave the shop</span></label>
       <select id="p_fulfilment">${["delivery", "courier", "both"].map((m) => `<option value="${m}" ${(p.fulfilment || "delivery") === m ? "selected" : ""}>${{ delivery: "Own delivery agent", courier: "Courier only", both: "Both (choose per order)" }[m]}</option>`).join("")}</select>`
+        : flowCourier
+        ? `<label style="margin-top:8px">Fulfilment</label><p class="muted small" style="margin:0">📦 Courier — the courier &amp; tracking are entered when each order is shipped.</p>`
         : `<label style="margin-top:8px">Fulfilment</label><p class="muted small" style="margin:0">On-site service — no delivery or courier.</p>`}
       <label class="row" style="margin-top:12px;gap:8px;align-items:center;cursor:pointer">
         <input type="checkbox" id="p_photo" ${p.photo_order ? "checked" : ""} style="width:auto;margin:0" />

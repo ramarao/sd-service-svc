@@ -1276,6 +1276,9 @@ app.get("/api/control/flows", requireControlToken, (c) =>
     // Does this flow deliver to the customer? (on-site flows like appliance don't —
     // so delivery/courier fulfilment doesn't apply to them.)
     delivers: (FLOWS[k].assignments || []).some((a) => a.role === "delivery"),
+    // Does the flow itself ship by courier (courier flow) → courier is inherent,
+    // no delivery/courier fulfilment choice, and it's not "on-site".
+    courier: (FLOWS[k].assignments || []).some((a) => a.role === "courier"),
   })) })
 );
 
