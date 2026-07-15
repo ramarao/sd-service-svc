@@ -259,15 +259,22 @@ export async function managerName(db, phone) {
 // the agent can take now ({ to, label, section } | null) — all flow-driven.
 export async function listCaptainJobs(db, flow, phone, providerId) {
   // COALESCE lets pre-snapshot orders fall back to the linked customer record.
-  const { results: orders } = await db
-    .prepare(
-      "SELECT o.*, COALESCE(o.customer_name, cu.name) AS cust_name, COALESCE(o.customer_phone, cu.wa_phone) AS cust_phone " +
-        "FROM orders o LEFT JOIN customers cu ON cu.id = o.customer_id " +
-        "WHERE o.provider_id = ? AND (o.captain_phone = ? OR o.delivery_captain_phone = ?) " +
-        "ORDER BY o.updated_at DESC LIMIT 100"
-    )
-    .bind(providerId, phone, phone)
-    .all();
+  // A captain sees an order if they hold either slot OR are one of its assignees
+  // (on-site jobs can have several). `is_assignee` drives the advance permission.
+  const sql = (withAssignees) =>
+    "SELECT o.*, COALESCE(o.customer_name, cu.name) AS cust_name, COALESCE(o.customer_phone, cu.wa_phone) AS cust_phone, " +
+    (withAssignees ? "EXISTS(SELECT 1 FROM order_assignees a WHERE a.order_id = o.id AND a.phone = ?) AS is_assignee " : "0 AS is_assignee ") +
+    "FROM orders o LEFT JOIN customers cu ON cu.id = o.customer_id " +
+    "WHERE o.provider_id = ? AND (o.captain_phone = ? OR o.delivery_captain_phone = ?" +
+    (withAssignees ? " OR EXISTS(SELECT 1 FROM order_assignees a WHERE a.order_id = o.id AND a.phone = ?)" : "") +
+    ") ORDER BY o.updated_at DESC LIMIT 100";
+  let orders;
+  try {
+    ({ results: orders } = await db.prepare(sql(true)).bind(phone, providerId, phone, phone, phone).all());
+  } catch {
+    // legacy D1 without order_assignees → slot-only matching
+    ({ results: orders } = await db.prepare(sql(false)).bind(providerId, phone, phone).all());
+  }
   if (!orders.length) return [];
   const ids = orders.map((o) => o.id);
   const ph = ids.map(() => "?").join(",");
@@ -283,15 +290,17 @@ export async function listCaptainJobs(db, flow, phone, providerId) {
   return orders.map((o) => {
     const its = byOrder.get(o.id) || [];
     const total = its.reduce((s, it) => s + it.qty * (it.unit_price || 0), 0);
+    const isAssignee = o.is_assignee === 1;
     const roles = [];
-    if (o.captain_phone === phone) roles.push("primary");
+    if (o.captain_phone === phone || isAssignee) roles.push("primary");
     if (o.delivery_captain_phone === phone) roles.push("delivery");
     // The advance action, if this agent owns the slot that advances this status.
+    // For the primary (on-site) slot, any assignee can advance.
     const step = advanceStep(flow, o.status);
     let action = null;
     if (step) {
-      const ownerPhone = step.slot === "delivery" ? o.delivery_captain_phone : o.captain_phone;
-      if (ownerPhone === phone) action = { to: step.to, label: step.label, section: step.section };
+      const owns = step.slot === "delivery" ? o.delivery_captain_phone === phone : (o.captain_phone === phone || isAssignee);
+      if (owns) action = { to: step.to, label: step.label, section: step.section };
     }
     return {
       id: o.id,
@@ -411,13 +420,25 @@ export async function getOrder(db, id) {
     const r = await db.prepare("SELECT id, data FROM order_images WHERE order_id = ? ORDER BY created_at ASC").bind(id).all();
     images = r.results || [];
   } catch { /* table absent on legacy D1 */ }
+  const assignees = await orderAssignees(db, id);
   const total = (items || []).reduce((s, it) => s + it.qty * (it.unit_price || 0), 0);
-  return { ...order, items, events, images, total };
+  return { ...order, items, events, images, assignees, total };
+}
+
+// Captains assigned to an order (on-site jobs may have several). Tolerates the
+// table being absent on a legacy D1.
+export async function orderAssignees(db, orderId) {
+  try {
+    const { results } = await db.prepare("SELECT id, name, phone FROM order_assignees WHERE order_id = ? ORDER BY created_at ASC").bind(orderId).all();
+    return results || [];
+  } catch {
+    return [];
+  }
 }
 
 // Advance/transition status, write an event, and notify the customer. The flow
 // is resolved from the order's provider → its vertical. Returns { order } or throws.
-export async function transitionOrder(env, db, { orderId, toStatus, actor, agentName, captainPhone, shipMode, courierName, courierTracking }) {
+export async function transitionOrder(env, db, { orderId, toStatus, actor, agentName, captainPhone, shipMode, courierName, courierTracking, assignees }) {
   const order = await db.prepare("SELECT * FROM orders WHERE id = ?").bind(orderId).first();
   if (!order) throw new Error("not_found");
   const provider = await getProvider(db, order.provider_id);
@@ -430,11 +451,17 @@ export async function transitionOrder(env, db, { orderId, toStatus, actor, agent
   // tracking. Only meaningful at an assignment step; otherwise ignored.
   const asg = assignmentAt(flow, toStatus);
   const courier = asg && shipMode === "courier";
+  // On-site jobs can assign several captains at the primary step. The list goes to
+  // order_assignees; the first also fills the legacy primary slot (display/notify).
+  const multi = !courier && asg?.slot === "primary" && Array.isArray(assignees)
+    ? assignees.map((a) => ({ name: (a?.name || "").trim() || null, phone: String(a?.phone || "").trim() })).filter((a) => a.phone)
+    : null;
+  const first = multi && multi.length ? multi[0] : null;
   // Route the field-agent selection into the slot this status assigns (if any).
   // primary → agent_name/captain_phone, delivery → delivery_captain_*. A status
   // that isn't an assignment point carries no agent and leaves both slots as-is.
-  const primaryName = !courier && asg?.slot === "primary" ? agentName || null : null;
-  const primaryPhone = !courier && asg?.slot === "primary" ? captainPhone || null : null;
+  const primaryName = !courier && asg?.slot === "primary" ? (multi ? (first?.name || null) : (agentName || null)) : null;
+  const primaryPhone = !courier && asg?.slot === "primary" ? (multi ? (first?.phone || null) : (captainPhone || null)) : null;
   const delivName = !courier && asg?.slot === "delivery" ? agentName || null : null;
   const delivPhone = !courier && asg?.slot === "delivery" ? captainPhone || null : null;
   const shipModeVal = asg ? (courier ? "courier" : "delivery") : null; // set at dispatch only
@@ -448,6 +475,12 @@ export async function transitionOrder(env, db, { orderId, toStatus, actor, agent
     )
     .bind(toStatus, primaryName, primaryPhone, delivName, delivPhone, shipModeVal, courier ? (courierName || null) : null, courier ? (courierTracking || null) : null, ts, orderId)
     .run();
+  // Replace the assignee list when a multi-captain assignment was made.
+  if (multi) {
+    const stmts = [db.prepare("DELETE FROM order_assignees WHERE order_id = ?").bind(orderId)];
+    for (const a of multi) stmts.push(db.prepare("INSERT INTO order_assignees (id, order_id, name, phone, created_at) VALUES (?,?,?,?,?)").bind(randomId(), orderId, a.name, a.phone, ts));
+    await db.batch(stmts);
+  }
   await db
     .prepare("INSERT INTO order_events (id, order_id, status, actor, at) VALUES (?,?,?,?,?)")
     .bind(randomId(), orderId, toStatus, actor || "admin", ts)

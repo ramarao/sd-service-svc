@@ -910,6 +910,7 @@ async function adminOrder(id) {
     // Show the agent picker when this step is a flow assignment point.
     const asg = (CFG.flow.assignments || []).find((a) => a.at === next);
     const courierable = asg && asg.role === "delivery" && (fulfilment === "courier" || fulfilment === "both");
+    const onsite = asg && !(CFG.flow.assignments || []).some((a) => a.role === "delivery");
     if (asg) {
       const term = CFG.brand?.agentTerm || "agent";
       const isDelivery = asg.slot === "delivery";
@@ -929,13 +930,17 @@ async function adminOrder(id) {
           ${fulfilment === "both" ? `<label>Fulfilment</label><div class="row" style="gap:6px;margin-bottom:6px"><button type="button" class="ghost small grow0 fmode${startCourier ? "" : " sel"}" data-mode="delivery">🛵 Own agent</button><button type="button" class="ghost small grow0 fmode${startCourier ? " sel" : ""}" data-mode="courier">📦 Courier</button></div>` : ""}
           <div id="deliverFields" style="display:${startCourier ? "none" : "block"}"><label>${label}</label>${picker}</div>
           <div id="courierFields" style="display:${startCourier ? "block" : "none"}"><label>Courier company</label><input id="courierName" value="${esc(order.courier_name || "")}" placeholder="DTDC, Delhivery, India Post…" /><label style="margin-top:6px">Tracking number</label><input id="courierTracking" value="${esc(order.courier_tracking || "")}" placeholder="Consignment / AWB number" /></div>`;
+      } else if (onsite && captains.length) {
+        const assigned = new Set((order.assignees || []).map((a) => a.phone));
+        agentField = `<label>Assign ${term.toLowerCase()}s <span class="muted small">— pick one or more</span></label>
+          <div id="multiCaptains">${captains.map((c) => `<label class="row" style="gap:8px;align-items:center;cursor:pointer;margin:4px 0"><input type="checkbox" class="mcap" data-name="${esc(c.name || "")}" data-phone="${esc(c.phone || "")}" ${assigned.has(c.phone) ? "checked" : ""} style="width:auto;margin:0" /><span>${esc(c.name || term)}${c.phone ? ` <span class="muted">· ${esc(c.phone)}</span>` : ""}</span></label>`).join("")}</div>`;
       } else {
         agentField = `<label>${label}</label>${picker}`;
       }
     }
     controls = `
       ${agentField}
-      <button id="save" data-next="${next}" data-courierable="${courierable ? 1 : 0}" data-start="${courierable && fulfilment === "courier" ? "courier" : "delivery"}" style="margin-top:12px">Advance to ${nextLabel} & notify</button>
+      <button id="save" data-next="${next}" data-courierable="${courierable ? 1 : 0}" data-onsite="${onsite && captains.length ? 1 : 0}" data-start="${courierable && fulfilment === "courier" ? "courier" : "delivery"}" style="margin-top:12px">Advance to ${nextLabel} & notify</button>
       <p id="msg"></p>`;
   } else {
     controls = `<p class="muted">${order.status === "REJECTED" ? "This request was rejected — no further action." : "Order delivered — complete."}</p>`;
@@ -945,7 +950,9 @@ async function adminOrder(id) {
     <div class="topbar"><h1>Order ${esc(order.id)}</h1><button class="ghost small" id="back">← Back</button></div>
     <div class="card">
       ${badge(order.status)}
-      ${order.agent_name ? `<p class="muted" style="margin-top:8px">🔧 ${esc(CFG.brand?.agentTerm || "Technician")}: ${esc(order.agent_name)}${order.captain_phone ? ` · <a href="tel:${esc(order.captain_phone)}">${esc(order.captain_phone)}</a>` : ""}</p>` : ""}
+      ${(order.assignees || []).length > 1
+        ? `<p class="muted" style="margin-top:8px">🔧 ${esc(CFG.brand?.agentTerm || "Technician")}s: ${order.assignees.map((a) => `${esc(a.name || a.phone)}${a.phone ? ` <a href="tel:${esc(a.phone)}">${esc(a.phone)}</a>` : ""}`).join(", ")}</p>`
+        : order.agent_name ? `<p class="muted" style="margin-top:8px">🔧 ${esc(CFG.brand?.agentTerm || "Technician")}: ${esc(order.agent_name)}${order.captain_phone ? ` · <a href="tel:${esc(order.captain_phone)}">${esc(order.captain_phone)}</a>` : ""}</p>` : ""}
       ${order.delivery_captain_name ? `<p class="muted" style="margin-top:4px">🛵 ${esc(order.delivery_captain_name)}${order.delivery_captain_phone ? ` · <a href="tel:${esc(order.delivery_captain_phone)}">${esc(order.delivery_captain_phone)}</a>` : ""}</p>` : ""}
       ${order.ship_mode === "courier" && order.courier_name ? `<p class="muted" style="margin-top:4px">📦 ${esc(order.courier_name)}${order.courier_tracking ? ` · Tracking ${esc(order.courier_tracking)}` : ""}</p>` : ""}
       <h2>Customer</h2>
@@ -995,6 +1002,12 @@ async function adminOrder(id) {
         const ct = document.getElementById("courierTracking")?.value.trim() || "";
         if (!cn) { const m = document.getElementById("msg"); m.className = "err"; m.textContent = "Enter the courier company."; return; }
         patch(saveBtn.dataset.next, "", "", { shipMode: "courier", courierName: cn, courierTracking: ct });
+        return;
+      }
+      if (saveBtn.dataset.onsite === "1") {
+        const assignees = [...document.querySelectorAll(".mcap:checked")].map((b) => ({ name: b.dataset.name, phone: b.dataset.phone }));
+        if (!assignees.length) { const m = document.getElementById("msg"); m.className = "err"; m.textContent = "Pick at least one captain."; return; }
+        patch(saveBtn.dataset.next, "", "", { assignees });
         return;
       }
       const elc = document.getElementById("agent");

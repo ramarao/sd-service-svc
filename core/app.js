@@ -59,6 +59,7 @@ import {
   getCaptainProviders,
   captainName,
   listCaptainJobs,
+  orderAssignees,
   replaceOrderItems,
   listManagers,
   createManager,
@@ -430,7 +431,10 @@ app.get("/api/captain/orders/:id", requireRole("captain"), async (c) => {
   const sess = c.get("session");
   const order = await getOrder(c.env.DB, c.req.param("id"));
   if (!order) return c.json({ error: "not_found" }, 404);
-  if (order.captain_phone !== sess.phone && order.delivery_captain_phone !== sess.phone) {
+  // A captain owns the order via a slot OR as one of its (on-site) assignees.
+  const assignee = (order.assignees || []).some((a) => a.phone === sess.phone);
+  const ownsPrimary = order.captain_phone === sess.phone || assignee;
+  if (!ownsPrimary && order.delivery_captain_phone !== sess.phone) {
     return c.json({ error: "forbidden" }, 403);
   }
   // Fall back to the linked customer for pre-snapshot orders.
@@ -444,15 +448,15 @@ app.get("/api/captain/orders/:id", requireRole("captain"), async (c) => {
   )
     .bind(order.provider_id)
     .all();
-  // The primary (pickup) agent may edit items only while the flow allows it.
+  // The primary agent (or any assignee) may edit items only while the flow allows it.
   const flow = flowForProvider(await getProvider(c.env.DB, order.provider_id));
-  const editable = itemsEditableAt(flow, order.status) && order.captain_phone === sess.phone;
+  const editable = itemsEditableAt(flow, order.status) && ownsPrimary;
   // The advance action, if this agent owns the slot that advances this status.
   const step = advanceStep(flow, order.status);
   let action = null;
   if (step) {
-    const ownerPhone = step.slot === "delivery" ? order.delivery_captain_phone : order.captain_phone;
-    if (ownerPhone === sess.phone) action = { to: step.to, label: step.label, paymentDue: step.to === flow.paymentAfter };
+    const owns = step.slot === "delivery" ? order.delivery_captain_phone === sess.phone : ownsPrimary;
+    if (owns) action = { to: step.to, label: step.label, paymentDue: step.to === flow.paymentAfter };
   }
   return c.json({ order, catalog, editable, action, paymentAfter: flow.paymentAfter });
 });
@@ -465,8 +469,9 @@ app.patch("/api/captain/orders/:id/items", requireRole("captain"), async (c) => 
   const order = await c.env.DB.prepare("SELECT * FROM orders WHERE id = ?").bind(c.req.param("id")).first();
   if (!order) return c.json({ error: "not_found" }, 404);
   const flow = flowForProvider(await getProvider(c.env.DB, order.provider_id));
-  if (order.captain_phone !== sess.phone || !itemsEditableAt(flow, order.status)) {
-    return c.json({ error: "locked" }, 403); // not the primary agent, or items no longer editable
+  const mayEdit = order.captain_phone === sess.phone || (await orderAssignees(c.env.DB, order.id)).some((a) => a.phone === sess.phone);
+  if (!mayEdit || !itemsEditableAt(flow, order.status)) {
+    return c.json({ error: "locked" }, 403); // not an assigned captain, or items no longer editable
   }
   if (!Array.isArray(items)) return c.json({ error: "no_items" }, 400);
   await replaceOrderItems(c.env.DB, order.id, order.provider_id, items);
@@ -485,8 +490,10 @@ app.post("/api/captain/orders/:id/advance", requireRole("captain"), async (c) =>
   const flow = flowForProvider(await getProvider(c.env.DB, order.provider_id));
   const step = advanceStep(flow, order.status);
   if (!step || step.to !== to) return c.json({ error: "invalid_transition" }, 400);
-  const ownerPhone = step.slot === "delivery" ? order.delivery_captain_phone : order.captain_phone;
-  if (ownerPhone !== sess.phone) return c.json({ error: "forbidden" }, 403);
+  // Delivery slot: only that captain. Primary/on-site: the slot captain or any assignee.
+  const assignee = step.slot !== "delivery" && (await orderAssignees(c.env.DB, order.id)).some((a) => a.phone === sess.phone);
+  const owns = step.slot === "delivery" ? order.delivery_captain_phone === sess.phone : (order.captain_phone === sess.phone || assignee);
+  if (!owns) return c.json({ error: "forbidden" }, 403);
   try {
     const updated = await transitionOrder(c.env, c.env.DB, { orderId: order.id, toStatus: step.to, actor: "captain" });
     await notifyOrders(c.env, order.provider_id);
@@ -503,7 +510,7 @@ app.get("/api/captain/orders/:id/payment", requireRole("captain"), async (c) => 
   const sess = c.get("session");
   const order = await getOrder(c.env.DB, c.req.param("id"));
   if (!order) return c.json({ error: "not_found" }, 404);
-  if (order.captain_phone !== sess.phone && order.delivery_captain_phone !== sess.phone) return c.json({ error: "forbidden" }, 403);
+  if (order.captain_phone !== sess.phone && order.delivery_captain_phone !== sess.phone && !(order.assignees || []).some((a) => a.phone === sess.phone)) return c.json({ error: "forbidden" }, 403);
   const provider = await getProvider(c.env.DB, order.provider_id);
   const pay = {
     payment_status: order.payment_status || null,
@@ -528,7 +535,7 @@ app.post("/api/captain/orders/:id/cash", requireRole("captain"), async (c) => {
   const sess = c.get("session");
   const order = await getOrder(c.env.DB, c.req.param("id"));
   if (!order) return c.json({ error: "not_found" }, 404);
-  if (order.captain_phone !== sess.phone && order.delivery_captain_phone !== sess.phone) return c.json({ error: "forbidden" }, 403);
+  if (order.captain_phone !== sess.phone && order.delivery_captain_phone !== sess.phone && !(order.assignees || []).some((a) => a.phone === sess.phone)) return c.json({ error: "forbidden" }, 403);
   await c.env.DB
     .prepare("UPDATE orders SET payment_status = 'paid', payment_amount = ?, payment_payer = ?, payment_ref = 'CASH', payment_at = ?, updated_at = ? WHERE id = ?")
     .bind(order.total || null, `Cash · ${sess.name || "captain"}`, now(), now(), order.id)
@@ -884,7 +891,7 @@ app.get("/api/admin/orders/:id", requireRole("admin", "super_admin", "manager"),
 // Advance status / assign captain → fires the WhatsApp notification.
 app.patch("/api/admin/orders/:id/status", requireRole("admin", "super_admin", "manager"), async (c) => {
   const sess = c.get("session");
-  const { status, agentName, captainPhone, shipMode, courierName, courierTracking } = await c.req.json().catch(() => ({}));
+  const { status, agentName, captainPhone, shipMode, courierName, courierTracking, assignees } = await c.req.json().catch(() => ({}));
   const order = await c.env.DB.prepare("SELECT * FROM orders WHERE id = ?").bind(c.req.param("id")).first();
   if (!order) return c.json({ error: "not_found" }, 404);
   const scope = providerScope(sess);
@@ -901,6 +908,7 @@ app.patch("/api/admin/orders/:id/status", requireRole("admin", "super_admin", "m
       shipMode,
       courierName,
       courierTracking,
+      assignees,
     });
     await notifyOrders(c.env, order.provider_id);
     return c.json({ ok: true, order: updated });

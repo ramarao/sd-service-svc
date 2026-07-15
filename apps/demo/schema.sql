@@ -217,6 +217,19 @@ CREATE TABLE IF NOT EXISTS order_images (
 );
 CREATE INDEX IF NOT EXISTS idx_order_images_order ON order_images(order_id);
 
+-- ── Captains assigned to an order (on-site jobs can have several) ─────────────
+-- The single agent_name/captain_phone slot still holds the "primary" captain for
+-- display/notify; this table lets an on-site job (e.g. plumbing) carry many.
+CREATE TABLE IF NOT EXISTS order_assignees (
+  id         TEXT PRIMARY KEY,
+  order_id   TEXT NOT NULL REFERENCES orders(id),
+  name       TEXT,
+  phone      TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_order_assignees_order ON order_assignees(order_id);
+CREATE INDEX IF NOT EXISTS idx_order_assignees_phone ON order_assignees(phone);
+
 -- ── Per-day order-number counter (drives 001-DDMMYY ids) ─────────────────────
 CREATE TABLE IF NOT EXISTS order_counters (
   day TEXT PRIMARY KEY,     -- 'DDMMYY' (IST)
