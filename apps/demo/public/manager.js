@@ -258,10 +258,12 @@ async function orderDetail(id) {
     const next = allowedNext[0];
     let agentField = "";
     const asg = (state.flow.assignments || []).find((a) => a.at === next);
+    // A courier-flow step always captures courier + tracking (no field agent).
+    const forcedCourier = asg && asg.role === "courier";
     // Courier is an alternative to a delivery-type assignment when the provider allows it.
     const courierable = asg && asg.role === "delivery" && (fulfilment === "courier" || fulfilment === "both");
-    // On-site flows (no delivery step, e.g. plumber) can assign several captains.
-    const onsite = asg && !(state.flow.assignments || []).some((a) => a.role === "delivery");
+    // On-site flows (no delivery/courier step, e.g. plumber) can assign several captains.
+    const onsite = asg && asg.role !== "courier" && !(state.flow.assignments || []).some((a) => a.role === "delivery");
     if (asg) {
       const term = state.brand?.agentTerm || "agent";
       const isDel = asg.slot === "delivery";
@@ -273,7 +275,10 @@ async function orderDetail(id) {
       } else {
         picker = `<p class="muted small">No ${esc(term.toLowerCase())}s yet — add them in the Captains tab.</p><input id="agent" value="${esc(cur || "")}" placeholder="${esc(term)} name" />`;
       }
-      if (courierable) {
+      if (forcedCourier) {
+        agentField = `<label>Courier company</label><input id="courierName" value="${esc(order.courier_name || "")}" placeholder="DTDC, Delhivery, India Post…" />
+          <label style="margin-top:6px">Tracking number</label><input id="courierTracking" value="${esc(order.courier_tracking || "")}" placeholder="Consignment / AWB number" />`;
+      } else if (courierable) {
         // fulfilment 'courier' → courier only; 'both' → let the manager choose.
         const startCourier = fulfilment === "courier";
         agentField = `
@@ -292,7 +297,7 @@ async function orderDetail(id) {
         agentField = `<label>Assign ${esc(term.toLowerCase())}</label>${picker}`;
       }
     }
-    controls = `${agentField}<button id="save" data-next="${next}" data-courierable="${courierable ? 1 : 0}" data-onsite="${onsite && captains.length ? 1 : 0}" data-start="${courierable && fulfilment === "courier" ? "courier" : "delivery"}" style="margin-top:12px">Advance to ${next.replace(/_/g, " ")} &amp; notify</button><p id="msg"></p>`;
+    controls = `${agentField}<button id="save" data-next="${next}" data-courierable="${courierable ? 1 : 0}" data-forcedcourier="${forcedCourier ? 1 : 0}" data-onsite="${onsite && captains.length ? 1 : 0}" data-start="${courierable && fulfilment === "courier" ? "courier" : "delivery"}" style="margin-top:12px">Advance to ${next.replace(/_/g, " ")} &amp; notify</button><p id="msg"></p>`;
   } else {
     controls = `<p class="muted">${order.status === (state.flow.decision?.reject) ? "Rejected — no further action." : "Complete — no further action."}</p>`;
   }
@@ -380,7 +385,7 @@ async function orderDetail(id) {
   }
   const save = document.getElementById("save");
   if (save) save.onclick = () => {
-    if (save.dataset.courierable === "1" && shipMode === "courier") {
+    if (save.dataset.forcedcourier === "1" || (save.dataset.courierable === "1" && shipMode === "courier")) {
       const cn = document.getElementById("courierName")?.value.trim() || "";
       const ct = document.getElementById("courierTracking")?.value.trim() || "";
       const msg = document.getElementById("msg");

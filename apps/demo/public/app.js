@@ -933,8 +933,9 @@ async function adminOrder(id) {
     let agentField = "";
     // Show the agent picker when this step is a flow assignment point.
     const asg = (CFG.flow.assignments || []).find((a) => a.at === next);
+    const forcedCourier = asg && asg.role === "courier";
     const courierable = asg && asg.role === "delivery" && (fulfilment === "courier" || fulfilment === "both");
-    const onsite = asg && !(CFG.flow.assignments || []).some((a) => a.role === "delivery");
+    const onsite = asg && asg.role !== "courier" && !(CFG.flow.assignments || []).some((a) => a.role === "delivery");
     if (asg) {
       const term = CFG.brand?.agentTerm || "agent";
       const isDelivery = asg.slot === "delivery";
@@ -948,7 +949,9 @@ async function adminOrder(id) {
       } else {
         picker = `<p class="muted">No ${term.toLowerCase()}s for this provider yet — add them in Providers → Edit → Captains.</p><input id="agent" value="${esc(current || "")}" placeholder="${term} name" />`;
       }
-      if (courierable) {
+      if (forcedCourier) {
+        agentField = `<label>Courier company</label><input id="courierName" value="${esc(order.courier_name || "")}" placeholder="DTDC, Delhivery, India Post…" /><label style="margin-top:6px">Tracking number</label><input id="courierTracking" value="${esc(order.courier_tracking || "")}" placeholder="Consignment / AWB number" />`;
+      } else if (courierable) {
         const startCourier = fulfilment === "courier";
         agentField = `
           ${fulfilment === "both" ? `<label>Fulfilment</label><div class="row" style="gap:6px;margin-bottom:6px"><button type="button" class="ghost small grow0 fmode${startCourier ? "" : " sel"}" data-mode="delivery">🛵 Own agent</button><button type="button" class="ghost small grow0 fmode${startCourier ? " sel" : ""}" data-mode="courier">📦 Courier</button></div>` : ""}
@@ -964,7 +967,7 @@ async function adminOrder(id) {
     }
     controls = `
       ${agentField}
-      <button id="save" data-next="${next}" data-courierable="${courierable ? 1 : 0}" data-onsite="${onsite && captains.length ? 1 : 0}" data-start="${courierable && fulfilment === "courier" ? "courier" : "delivery"}" style="margin-top:12px">Advance to ${nextLabel} & notify</button>
+      <button id="save" data-next="${next}" data-courierable="${courierable ? 1 : 0}" data-forcedcourier="${forcedCourier ? 1 : 0}" data-onsite="${onsite && captains.length ? 1 : 0}" data-start="${courierable && fulfilment === "courier" ? "courier" : "delivery"}" style="margin-top:12px">Advance to ${nextLabel} & notify</button>
       <p id="msg"></p>`;
   } else {
     controls = `<p class="muted">${order.status === "REJECTED" ? "This request was rejected — no further action." : "Order delivered — complete."}</p>`;
@@ -1056,7 +1059,7 @@ async function adminOrder(id) {
   const saveBtn = document.getElementById("save");
   if (saveBtn) {
     saveBtn.onclick = () => {
-      if (saveBtn.dataset.courierable === "1" && shipMode === "courier") {
+      if (saveBtn.dataset.forcedcourier === "1" || (saveBtn.dataset.courierable === "1" && shipMode === "courier")) {
         const cn = document.getElementById("courierName")?.value.trim() || "";
         const ct = document.getElementById("courierTracking")?.value.trim() || "";
         if (!cn) { const m = document.getElementById("msg"); m.className = "err"; m.textContent = "Enter the courier company."; return; }

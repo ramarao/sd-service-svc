@@ -7,8 +7,9 @@
 import laundry from "./laundry.js";
 import appliance from "./appliance.js";
 import delivery from "./delivery.js";
+import courier from "./courier.js";
 
-export const FLOWS = { laundry, appliance, delivery };
+export const FLOWS = { laundry, appliance, delivery, courier };
 
 // The default vertical used when a provider has no `vertical` set — set once per
 // Worker by createApp(config.defaultVertical). Keeps single-vertical apps (dhobi,

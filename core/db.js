@@ -470,7 +470,7 @@ export async function transitionOrder(env, db, { orderId, toStatus, actor, agent
   // Courier dispatch: instead of assigning a field agent, record the courier +
   // tracking. Only meaningful at an assignment step; otherwise ignored.
   const asg = assignmentAt(flow, toStatus);
-  const courier = asg && shipMode === "courier";
+  const courier = asg && (shipMode === "courier" || asg.role === "courier");
   // On-site jobs can assign several captains at the primary step. The list goes to
   // order_assignees; the first also fills the legacy primary slot (display/notify).
   const multi = !courier && asg?.slot === "primary" && Array.isArray(assignees)
