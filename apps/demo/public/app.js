@@ -157,7 +157,7 @@ async function renderCustomer(slug) {
   const who = await me();
   if (!who.authenticated || who.role !== "customer") return customerLogin(slug, provider);
 
-  const { orders } = await api("/api/my/orders");
+  const { orders } = await api(`/api/my/orders?provider=${encodeURIComponent(slug)}`);
   const list = orders
     .map(
       (o) => `<div class="order-line" data-id="${o.id}">

@@ -754,14 +754,21 @@ app.get("/api/geo/reverse", requireRole("customer", "admin", "super_admin"), asy
 });
 
 // Customer lists their own orders (scoped by session, never by client input).
+// Optional ?provider=<slug> narrows to one shop — so a shop's page shows only
+// that shop's orders, not the customer's whole cross-shop history.
 app.get("/api/my/orders", requireRole("customer"), async (c) => {
   const sess = c.get("session");
+  const slug = c.req.query("provider");
+  const provider = slug ? await getProviderBySlug(c.env.DB, slug) : null;
+  const clauses = ["customer_id = ?"];
+  const binds = [sess.customer_id];
+  if (slug) { clauses.push("provider_id = ?"); binds.push(provider?.id || "__none__"); }
   const { results } = await c.env.DB.prepare(
     "SELECT id, provider_id, status, address, created_at, updated_at, " +
       "(SELECT COALESCE(SUM(qty*unit_price),0) FROM order_items WHERE order_id = orders.id) AS total " +
-      "FROM orders WHERE customer_id = ? ORDER BY created_at DESC"
+      `FROM orders WHERE ${clauses.join(" AND ")} ORDER BY created_at DESC`
   )
-    .bind(sess.customer_id)
+    .bind(...binds)
     .all();
   return c.json({ orders: results });
 });
