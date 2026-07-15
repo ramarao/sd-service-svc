@@ -274,13 +274,18 @@ async function providerDetail(townId, p) {
   const A = (path) => `/api/towns/${townId}/providers/${pid}${path}`;
   h(`<div class="topbar"><h1>${esc(p.name)}</h1><button class="ghost small" id="back">←</button></div><div id="body"><p class="muted">Loading…</p></div>`);
   document.getElementById("back").onclick = () => townDetail(townId);
-  const [mgrs, caps, cat, verts] = await Promise.all([
+  const [mgrs, caps, cat, verts, flowsR] = await Promise.all([
     api(A("/managers")).catch(() => ({ managers: [] })),
     api(A("/captains")).catch(() => ({ captains: [] })),
     api(A("/catalog")).catch(() => ({ catalog: [] })),
     api(`/api/towns/${townId}/verticals`).catch(() => ({ verticals: [] })),
+    api(`/api/towns/${townId}/flows`).catch(() => ({ flows: [] })),
   ]);
   const list = (rows, render, empty) => rows.length ? rows.map(render).join("") : `<p class="muted small">${empty}</p>`;
+  // Fulfilment (delivery/courier) only applies to flows that deliver to the customer.
+  // On-site flows (appliance/plumber) have no delivery step → not applicable.
+  const provFlow = (verts.verticals || []).find((x) => x.slug === p.vertical)?.flow;
+  const flowDelivers = (flowsR.flows || []).find((f) => f.key === provFlow)?.delivers !== false;
   document.getElementById("body").innerHTML = `
     <div class="card">
       <label>Name</label><input id="p_name" value="${esc(p.name)}" />
@@ -288,8 +293,10 @@ async function providerDetail(townId, p) {
       <label style="margin-top:8px">Vertical</label>
       <select id="p_vertical">${(verts.verticals || []).map((x) => `<option value="${esc(x.slug)}" ${x.slug === p.vertical ? "selected" : ""}>${esc(x.name)}</option>`).join("") || `<option value="${esc(p.vertical || "")}">${esc(p.vertical || "—")}</option>`}</select>
       <label style="margin-top:8px">UPI ID</label><input id="p_upi" value="${esc(p.upi_id || "")}" placeholder="shop@upi" />
-      <label style="margin-top:8px">Fulfilment <span class="muted small">— how orders leave the shop</span></label>
-      <select id="p_fulfilment">${["delivery", "courier", "both"].map((m) => `<option value="${m}" ${(p.fulfilment || "delivery") === m ? "selected" : ""}>${{ delivery: "Own delivery agent", courier: "Courier only", both: "Both (choose per order)" }[m]}</option>`).join("")}</select>
+      ${flowDelivers
+        ? `<label style="margin-top:8px">Fulfilment <span class="muted small">— how orders leave the shop</span></label>
+      <select id="p_fulfilment">${["delivery", "courier", "both"].map((m) => `<option value="${m}" ${(p.fulfilment || "delivery") === m ? "selected" : ""}>${{ delivery: "Own delivery agent", courier: "Courier only", both: "Both (choose per order)" }[m]}</option>`).join("")}</select>`
+        : `<label style="margin-top:8px">Fulfilment</label><p class="muted small" style="margin:0">On-site service — no delivery or courier.</p>`}
       <label class="row" style="margin-top:12px;gap:8px;align-items:center;cursor:pointer">
         <input type="checkbox" id="p_photo" ${p.photo_order ? "checked" : ""} style="width:auto;margin:0" />
         <span>Photo / list upload <span class="muted small">— customer can send a picture or item list; Groq reads it and pre-fills the order</span></span>
@@ -333,7 +340,7 @@ async function providerDetail(townId, p) {
 
   document.getElementById("psave").onclick = async () => {
     const msg = document.getElementById("pmsg");
-    try { await api(A(""), { method: "PATCH", body: { name: v("p_name"), slug: slugify(v("p_slug")), vertical: v("p_vertical"), upi_id: v("p_upi"), fulfilment: v("p_fulfilment"), photo_order: document.getElementById("p_photo").checked } }); msg.className = "small"; msg.textContent = "Saved ✓"; }
+    try { await api(A(""), { method: "PATCH", body: { name: v("p_name"), slug: slugify(v("p_slug")), vertical: v("p_vertical"), upi_id: v("p_upi"), fulfilment: document.getElementById("p_fulfilment")?.value, photo_order: document.getElementById("p_photo").checked } }); msg.className = "small"; msg.textContent = "Saved ✓"; }
     catch (e) { msg.className = "err"; msg.textContent = e.message; }
   };
   document.getElementById("pdel").onclick = async () => {

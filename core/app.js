@@ -1238,7 +1238,14 @@ app.get("/api/control/summary", requireControlToken, async (c) => {
 
 // The flow shapes available in this build (so the admin can pick a vertical's flow).
 app.get("/api/control/flows", requireControlToken, (c) =>
-  c.json({ flows: Object.keys(FLOWS).map((k) => ({ key: k, agentTerm: FLOWS[k].agentTerm, statuses: FLOWS[k].statuses })) })
+  c.json({ flows: Object.keys(FLOWS).map((k) => ({
+    key: k,
+    agentTerm: FLOWS[k].agentTerm,
+    statuses: FLOWS[k].statuses,
+    // Does this flow deliver to the customer? (on-site flows like appliance don't —
+    // so delivery/courier fulfilment doesn't apply to them.)
+    delivers: (FLOWS[k].assignments || []).some((a) => a.role === "delivery"),
+  })) })
 );
 
 // Verticals (including inactive).
