@@ -763,7 +763,21 @@ app.get("/api/my/orders/:id", requireRole("customer"), async (c) => {
   const sess = c.get("session");
   const order = await getOrder(c.env.DB, c.req.param("id"));
   if (!order || order.customer_id !== sess.customer_id) return c.json({ error: "not_found" }, 404);
-  return c.json({ order });
+  // Courier orders are prepaid → give the customer a tappable UPI link to pay from
+  // their own phone (opens GPay/PhonePe). Only while not yet paid and UPI is set up.
+  let pay = null;
+  if (order.ship_mode === "courier" && order.payment_status !== "paid" && order.total) {
+    const provider = await getProvider(c.env.DB, order.provider_id);
+    if (provider?.upi_id) {
+      const amount = (Number(order.total) / 100).toFixed(2);
+      const payee = provider.upi_name || provider.name;
+      pay = {
+        amount,
+        upi: `upi://pay?pa=${encodeURIComponent(provider.upi_id)}&pn=${encodeURIComponent(payee)}&am=${amount}&cu=INR&tr=${encodeURIComponent(order.id)}&tn=${encodeURIComponent("Order " + order.id)}`,
+      };
+    }
+  }
+  return c.json({ order, pay });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -862,14 +876,15 @@ app.get("/api/admin/orders/:id", requireRole("admin", "super_admin", "manager"),
   // enrich with customer contact, valid next statuses, and the provider's captains
   const customer = await getCustomer(c.env.DB, order.customer_id);
   const captains = await listCaptains(c.env.DB, order.provider_id);
-  const flow = flowForProvider(await getProvider(c.env.DB, order.provider_id));
-  return c.json({ order, customer, allowedNext: allowedTransitions(flow, order.status), captains, flow });
+  const prov = await getProvider(c.env.DB, order.provider_id);
+  const flow = flowForProvider(prov);
+  return c.json({ order, customer, allowedNext: allowedTransitions(flow, order.status), captains, flow, fulfilment: prov?.fulfilment || "delivery" });
 });
 
 // Advance status / assign captain → fires the WhatsApp notification.
 app.patch("/api/admin/orders/:id/status", requireRole("admin", "super_admin", "manager"), async (c) => {
   const sess = c.get("session");
-  const { status, agentName, captainPhone } = await c.req.json().catch(() => ({}));
+  const { status, agentName, captainPhone, shipMode, courierName, courierTracking } = await c.req.json().catch(() => ({}));
   const order = await c.env.DB.prepare("SELECT * FROM orders WHERE id = ?").bind(c.req.param("id")).first();
   if (!order) return c.json({ error: "not_found" }, 404);
   const scope = providerScope(sess);
@@ -883,6 +898,9 @@ app.patch("/api/admin/orders/:id/status", requireRole("admin", "super_admin", "m
       actor: sess.role,
       agentName,
       captainPhone,
+      shipMode,
+      courierName,
+      courierTracking,
     });
     await notifyOrders(c.env, order.provider_id);
     return c.json({ ok: true, order: updated });
@@ -1256,19 +1274,21 @@ app.delete("/api/control/verticals/:slug", requireControlToken, async (c) => {
 
 // Providers.
 app.get("/api/control/providers", requireControlToken, async (c) => {
-  const { results } = await c.env.DB.prepare("SELECT id, slug, name, vertical, photo_order, upi_id, upi_name FROM service_providers ORDER BY vertical, name").all();
+  const { results } = await c.env.DB.prepare("SELECT id, slug, name, vertical, photo_order, fulfilment, upi_id, upi_name FROM service_providers ORDER BY vertical, name").all();
   return c.json({ providers: results || [] });
 });
+const FULFILMENTS = ["delivery", "courier", "both"];
 app.post("/api/control/providers", requireControlToken, async (c) => {
-  const { slug: rawSlug, name, vertical, photo_order, upi_id, upi_name } = await c.req.json().catch(() => ({}));
+  const { slug: rawSlug, name, vertical, photo_order, fulfilment, upi_id, upi_name } = await c.req.json().catch(() => ({}));
   // Slug is URL path (/{slug}/app) → must be URL-safe. Slugify defensively so a
   // name like "Ravi Chicken" can't be stored as "ravi chicken".
   const slug = String(rawSlug || name || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
   if (!slug || !name || !vertical) return c.json({ error: "missing" }, 400);
+  const ful = FULFILMENTS.includes(fulfilment) ? fulfilment : "delivery";
   const id = randomId();
   try {
-    await c.env.DB.prepare("INSERT INTO service_providers (id, slug, name, vertical, photo_order, config, upi_id, upi_name, created_at) VALUES (?,?,?,?,?,?,?,?,?)")
-      .bind(id, slug, name, vertical, photo_order ? 1 : 0, "{}", upi_id || null, upi_name || null, now()).run();
+    await c.env.DB.prepare("INSERT INTO service_providers (id, slug, name, vertical, photo_order, fulfilment, config, upi_id, upi_name, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)")
+      .bind(id, slug, name, vertical, photo_order ? 1 : 0, ful, "{}", upi_id || null, upi_name || null, now()).run();
   } catch (e) {
     return c.json({ error: "slug_taken_or_invalid", detail: String(e) }, 400);
   }
@@ -1282,13 +1302,15 @@ app.patch("/api/control/providers/:id", requireControlToken, async (c) => {
   const slug = b.slug !== undefined
     ? String(b.slug).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || cur.slug
     : cur.slug;
+  const ful = b.fulfilment !== undefined ? (FULFILMENTS.includes(b.fulfilment) ? b.fulfilment : cur.fulfilment || "delivery") : (cur.fulfilment || "delivery");
   try {
-    await c.env.DB.prepare("UPDATE service_providers SET name=?, slug=?, vertical=?, photo_order=?, upi_id=?, upi_name=? WHERE id=?")
+    await c.env.DB.prepare("UPDATE service_providers SET name=?, slug=?, vertical=?, photo_order=?, fulfilment=?, upi_id=?, upi_name=? WHERE id=?")
       .bind(
         b.name?.trim() || cur.name,
         slug,
         b.vertical || cur.vertical,
         b.photo_order !== undefined ? (b.photo_order ? 1 : 0) : (cur.photo_order || 0),
+        ful,
         b.upi_id !== undefined ? b.upi_id || null : cur.upi_id,
         b.upi_name !== undefined ? b.upi_name || null : cur.upi_name,
         cur.id

@@ -417,7 +417,7 @@ export async function getOrder(db, id) {
 
 // Advance/transition status, write an event, and notify the customer. The flow
 // is resolved from the order's provider → its vertical. Returns { order } or throws.
-export async function transitionOrder(env, db, { orderId, toStatus, actor, agentName, captainPhone }) {
+export async function transitionOrder(env, db, { orderId, toStatus, actor, agentName, captainPhone, shipMode, courierName, courierTracking }) {
   const order = await db.prepare("SELECT * FROM orders WHERE id = ?").bind(orderId).first();
   if (!order) throw new Error("not_found");
   const provider = await getProvider(db, order.provider_id);
@@ -426,22 +426,27 @@ export async function transitionOrder(env, db, { orderId, toStatus, actor, agent
   if (!canTransition(flow, order.status, toStatus)) throw new Error("invalid_transition");
 
   const ts = now();
+  // Courier dispatch: instead of assigning a field agent, record the courier +
+  // tracking. Only meaningful at an assignment step; otherwise ignored.
+  const asg = assignmentAt(flow, toStatus);
+  const courier = asg && shipMode === "courier";
   // Route the field-agent selection into the slot this status assigns (if any).
   // primary → agent_name/captain_phone, delivery → delivery_captain_*. A status
   // that isn't an assignment point carries no agent and leaves both slots as-is.
-  const asg = assignmentAt(flow, toStatus);
-  const primaryName = asg?.slot === "primary" ? agentName || null : null;
-  const primaryPhone = asg?.slot === "primary" ? captainPhone || null : null;
-  const delivName = asg?.slot === "delivery" ? agentName || null : null;
-  const delivPhone = asg?.slot === "delivery" ? captainPhone || null : null;
+  const primaryName = !courier && asg?.slot === "primary" ? agentName || null : null;
+  const primaryPhone = !courier && asg?.slot === "primary" ? captainPhone || null : null;
+  const delivName = !courier && asg?.slot === "delivery" ? agentName || null : null;
+  const delivPhone = !courier && asg?.slot === "delivery" ? captainPhone || null : null;
+  const shipModeVal = asg ? (courier ? "courier" : "delivery") : null; // set at dispatch only
   await db
     .prepare(
       "UPDATE orders SET status = ?, " +
         "agent_name = COALESCE(?, agent_name), captain_phone = COALESCE(?, captain_phone), " +
         "delivery_captain_name = COALESCE(?, delivery_captain_name), delivery_captain_phone = COALESCE(?, delivery_captain_phone), " +
+        "ship_mode = COALESCE(?, ship_mode), courier_name = COALESCE(?, courier_name), courier_tracking = COALESCE(?, courier_tracking), " +
         "updated_at = ? WHERE id = ?"
     )
-    .bind(toStatus, primaryName, primaryPhone, delivName, delivPhone, ts, orderId)
+    .bind(toStatus, primaryName, primaryPhone, delivName, delivPhone, shipModeVal, courier ? (courierName || null) : null, courier ? (courierTracking || null) : null, ts, orderId)
     .run();
   await db
     .prepare("INSERT INTO order_events (id, order_id, status, actor, at) VALUES (?,?,?,?,?)")

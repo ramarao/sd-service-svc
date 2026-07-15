@@ -219,7 +219,7 @@ async function orderDetail(id) {
   document.getElementById("back").onclick = dashboard;
   let d;
   try { d = await api(`/api/admin/orders/${encodeURIComponent(id)}`); } catch (e) { content && (el.innerHTML = `<div class="card"><p class="err">${esc(e.message)}</p></div>`); return; }
-  const { order, customer, allowedNext = [], captains = [] } = d;
+  const { order, customer, allowedNext = [], captains = [], fulfilment = "delivery" } = d;
   const items = (order.items || []).map((i) => `<li>${esc(i.name)} × ${i.qty}${i.unit_price ? ` <span class="muted">— ${money(i.qty * i.unit_price)}</span>` : ""}</li>`).join("");
 
   // Before accepting, the manager can reconcile the item list — essential for
@@ -253,18 +253,35 @@ async function orderDetail(id) {
     const next = allowedNext[0];
     let agentField = "";
     const asg = (state.flow.assignments || []).find((a) => a.at === next);
+    // Courier is an alternative to a delivery-type assignment when the provider allows it.
+    const courierable = asg && asg.role === "delivery" && (fulfilment === "courier" || fulfilment === "both");
     if (asg) {
       const term = state.brand?.agentTerm || "agent";
       const isDel = asg.slot === "delivery";
       const cur = isDel ? order.delivery_captain_name : order.agent_name;
+      let picker;
       if (captains.length) {
         const opts = `<option value="">Select…</option>` + captains.map((c) => `<option value="${c.id}" data-name="${esc(c.name || "")}" data-phone="${esc(c.phone || "")}" ${cur === c.name ? "selected" : ""}>${esc(c.name || term)}${c.phone ? " · " + esc(c.phone) : ""}</option>`).join("");
-        agentField = `<label>Assign ${esc(term.toLowerCase())}</label><select id="agent">${opts}</select>`;
+        picker = `<select id="agent">${opts}</select>`;
       } else {
-        agentField = `<label>Assign ${esc(term.toLowerCase())}</label><p class="muted small">No ${esc(term.toLowerCase())}s yet — add them in the Captains tab.</p><input id="agent" value="${esc(cur || "")}" placeholder="${esc(term)} name" />`;
+        picker = `<p class="muted small">No ${esc(term.toLowerCase())}s yet — add them in the Captains tab.</p><input id="agent" value="${esc(cur || "")}" placeholder="${esc(term)} name" />`;
+      }
+      if (courierable) {
+        // fulfilment 'courier' → courier only; 'both' → let the manager choose.
+        const startCourier = fulfilment === "courier";
+        agentField = `
+          ${fulfilment === "both" ? `<label>Fulfilment</label>
+          <div class="row" style="gap:6px;margin-bottom:6px"><button type="button" class="ghost small grow0 fmode${startCourier ? "" : " sel"}" data-mode="delivery">🛵 Own agent</button><button type="button" class="ghost small grow0 fmode${startCourier ? " sel" : ""}" data-mode="courier">📦 Courier</button></div>` : ""}
+          <div id="deliverFields" style="display:${startCourier ? "none" : "block"}"><label>Assign ${esc(term.toLowerCase())}</label>${picker}</div>
+          <div id="courierFields" style="display:${startCourier ? "block" : "none"}">
+            <label>Courier company</label><input id="courierName" value="${esc(order.courier_name || "")}" placeholder="DTDC, Delhivery, India Post…" />
+            <label style="margin-top:6px">Tracking number</label><input id="courierTracking" value="${esc(order.courier_tracking || "")}" placeholder="Consignment / AWB number" />
+          </div>`;
+      } else {
+        agentField = `<label>Assign ${esc(term.toLowerCase())}</label>${picker}`;
       }
     }
-    controls = `${agentField}<button id="save" data-next="${next}" style="margin-top:12px">Advance to ${next.replace(/_/g, " ")} &amp; notify</button><p id="msg"></p>`;
+    controls = `${agentField}<button id="save" data-next="${next}" data-courierable="${courierable ? 1 : 0}" data-start="${courierable && fulfilment === "courier" ? "courier" : "delivery"}" style="margin-top:12px">Advance to ${next.replace(/_/g, " ")} &amp; notify</button><p id="msg"></p>`;
   } else {
     controls = `<p class="muted">${order.status === (state.flow.decision?.reject) ? "Rejected — no further action." : "Complete — no further action."}</p>`;
   }
@@ -278,6 +295,7 @@ async function orderDetail(id) {
       ${order.lat != null ? `<p class="small" style="margin:4px 0"><a href="https://www.google.com/maps?q=${order.lat},${order.lng}" target="_blank" rel="noopener">📍 Navigate</a></p>` : ""}
       ${order.agent_name ? `<p class="muted small" style="margin:6px 0 0">🔧 ${esc(state.brand?.agentTerm || "Technician")}: ${esc(order.agent_name)}${order.captain_phone ? ` · <a href="tel:${esc(order.captain_phone)}">${esc(order.captain_phone)}</a>` : ""}</p>` : ""}
       ${order.delivery_captain_name ? `<p class="muted small" style="margin:2px 0 0">🛵 ${esc(order.delivery_captain_name)}${order.delivery_captain_phone ? ` · <a href="tel:${esc(order.delivery_captain_phone)}">${esc(order.delivery_captain_phone)}</a>` : ""}</p>` : ""}
+      ${order.ship_mode === "courier" && order.courier_name ? `<p class="muted small" style="margin:6px 0 0">📦 ${esc(order.courier_name)}${order.courier_tracking ? ` · Tracking ${esc(order.courier_tracking)}` : ""}</p>` : ""}
     </div>
     ${itemsCardHtml}
     ${imagesCardHtml}
@@ -285,11 +303,20 @@ async function orderDetail(id) {
     <div class="card"><h2 style="margin-top:0">History</h2><ul class="timeline">${(order.events || []).map((e) => `<li>${badge(e.status)} <span class="muted">${fmtDate(e.at)} · ${esc(e.actor)}</span></li>`).join("")}</ul></div>`);
   document.getElementById("back").onclick = dashboard;
 
-  const patch = async (status, agentName, captainPhone) => {
+  const patch = async (status, agentName, captainPhone, courier) => {
     const msg = document.getElementById("msg");
-    try { await api(`/api/admin/orders/${encodeURIComponent(id)}/status`, { method: "PATCH", body: { status, agentName, captainPhone } }); orderDetail(id); }
+    try { await api(`/api/admin/orders/${encodeURIComponent(id)}/status`, { method: "PATCH", body: { status, agentName, captainPhone, ...(courier || {}) } }); orderDetail(id); }
     catch (e) { msg.className = "err"; msg.textContent = e.message === "invalid_transition" ? "That change isn't allowed." : e.message; }
   };
+  // Delivery ↔ courier toggle (only rendered when the provider allows courier).
+  let shipMode = document.getElementById("save")?.dataset.start === "courier" ? "courier" : "delivery";
+  document.querySelectorAll(".fmode").forEach((b) => (b.onclick = () => {
+    shipMode = b.dataset.mode;
+    document.querySelectorAll(".fmode").forEach((x) => x.classList.toggle("sel", x === b));
+    const df = document.getElementById("deliverFields"), cf = document.getElementById("courierFields");
+    if (df) df.style.display = shipMode === "courier" ? "none" : "block";
+    if (cf) cf.style.display = shipMode === "courier" ? "block" : "none";
+  }));
   // Editable item list (photo/list-order reconciliation) — only at REQUESTED.
   if (editable) {
     const box = document.getElementById("edititems");
@@ -336,6 +363,14 @@ async function orderDetail(id) {
   }
   const save = document.getElementById("save");
   if (save) save.onclick = () => {
+    if (save.dataset.courierable === "1" && shipMode === "courier") {
+      const cn = document.getElementById("courierName")?.value.trim() || "";
+      const ct = document.getElementById("courierTracking")?.value.trim() || "";
+      const msg = document.getElementById("msg");
+      if (!cn) { if (msg) { msg.className = "err"; msg.textContent = "Enter the courier company."; } return; }
+      patch(save.dataset.next, "", "", { shipMode: "courier", courierName: cn, courierTracking: ct });
+      return;
+    }
     const elc = document.getElementById("agent"); let agentName = "", captainPhone = "";
     if (elc) { if (elc.tagName === "SELECT") { const o = elc.selectedOptions[0]; agentName = o?.dataset.name || ""; captainPhone = o?.dataset.phone || ""; } else agentName = elc.value; }
     patch(save.dataset.next, agentName, captainPhone);

@@ -87,16 +87,25 @@ export function formatMoney(paise, cur = "INR") {
 
 export async function notifyCustomer(waCfg, { flow, provider, customer, status, order }) {
   const cfg = safeConfig(provider.config);
-  const label = cfg.statusLabels?.[status] || flow?.labels?.[status] || status;
+  const courier = order.ship_mode === "courier";
+  let label = cfg.statusLabels?.[status] || flow?.labels?.[status] || status;
+  // Courier orders are "shipped", not "out for delivery".
+  const asg = flow ? assignmentAt(flow, status) : null;
+  if (courier && asg) label = "Your order has been shipped 📦";
   const amount = order.total ? `\nAmount: ${formatMoney(order.total, cfg.currency)}` : "";
   // Name the field agent for this status: when the status is an assignment point,
   // read the slot it assigns. (Dhobi: OUT_FOR_DELIVERY names the delivery captain.)
-  const asg = flow ? assignmentAt(flow, status) : null;
   const capName = asg?.slot === "delivery" ? order.delivery_captain_name : asg?.slot === "primary" ? order.agent_name : null;
   const capPhone = asg?.slot === "delivery" ? order.delivery_captain_phone : asg?.slot === "primary" ? order.captain_phone : null;
   const agentTerm = flow?.agentTerm || "Captain";
-  const captain = capName ? `\n${agentTerm}: ${capName}${capPhone ? ` (+${capPhone})` : ""}` : "";
-  const freeText = `${label}\nOrder ${order.id}${amount}${captain}`;
+  // Courier: show the courier + tracking (and a prepaid nudge) instead of an agent.
+  const dispatch = courier
+    ? (order.courier_name ? `\nCourier: ${order.courier_name}${order.courier_tracking ? ` · Tracking: ${order.courier_tracking}` : ""}` : "")
+    : (capName ? `\n${agentTerm}: ${capName}${capPhone ? ` (+${capPhone})` : ""}` : "");
+  const payNote = courier && asg && order.payment_status !== "paid" && order.total
+    ? `\nPlease pay online to confirm your shipment.`
+    : "";
+  const freeText = `${label}\nOrder ${order.id}${amount}${dispatch}${payNote}`;
 
   let payload;
   if (withinWindow(customer.last_inbound_at)) {

@@ -554,3 +554,7 @@ ol.steps li { margin: 8px 0; }
 /* Out-of-stock catalog items — greyed on the order form + manager list. */
 .pick-row.pick-off { opacity: 0.5; }
 .order-line.item-off { opacity: 0.6; }
+
+/* Courier prepaid pay button + fulfilment mode toggle. */
+.paybtn { display: block; text-align: center; margin-top: 12px; padding: 12px; border-radius: 10px; background: var(--accent); color: #fff; text-decoration: none; font-weight: 600; }
+.fmode.sel { background: var(--accent); color: #fff; border-color: var(--accent); }

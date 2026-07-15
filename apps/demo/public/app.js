@@ -701,17 +701,24 @@ async function customerNewOrder(slug, provider) {
 }
 
 async function customerTrack(id) {
-  const { order } = await api(`/api/my/orders/${id}`);
+  const { order, pay } = await api(`/api/my/orders/${id}`);
   const items = order.items
     .map((i) => `<li>${esc(i.name)} × ${i.qty}${i.unit_price ? ` <span class="muted">— ${money(i.qty * i.unit_price)}</span>` : ""}</li>`)
     .join("");
   const tl = order.events.map((e) => `<li>${badge(e.status)} <span class="muted">${fmtDate(e.at)}</span></li>`).join("");
   const imgs = (order.images || []).map((im) => `<a href="${im.data}" target="_blank" rel="noopener" class="pthumb"><img src="${im.data}" alt="uploaded photo" /></a>`).join("");
+  const courier = order.ship_mode === "courier";
+  const dispatchLine = courier
+    ? (order.courier_name ? `<span class="muted">· 📦 ${esc(order.courier_name)}${order.courier_tracking ? ` · ${esc(order.courier_tracking)}` : ""}</span>` : `<span class="muted">· 📦 Courier</span>`)
+    : order.agent_name ? `<span class="muted">· 🔧 ${esc(CFG.brand?.agentTerm || "Technician")}: ${esc(order.agent_name)}</span>`
+    : order.delivery_captain_name ? `<span class="muted">· 🛵 ${esc(order.delivery_captain_name)}</span>` : "";
   h(`
     <div class="topbar"><h1>Order ${esc(order.id)}</h1><button class="ghost small" id="back">← Back</button></div>
-    <div class="card">${badge(order.status)} ${order.agent_name ? `<span class="muted">· 🔧 ${esc(CFG.brand?.agentTerm || "Technician")}: ${esc(order.agent_name)}</span>` : order.delivery_captain_name ? `<span class="muted">· 🛵 ${esc(order.delivery_captain_name)}</span>` : ""}
+    <div class="card">${badge(order.status)} ${dispatchLine}
       <h2>Items</h2><ul>${items}</ul>
       <div class="row" style="align-items:baseline"><strong style="flex:1">Total</strong><strong style="flex:0 0 auto;font-size:17px">${money(order.total)}</strong></div>
+      ${courier && order.courier_tracking ? `<p class="small" style="margin-top:8px">📦 Shipped via <b>${esc(order.courier_name || "courier")}</b> · Tracking <b>${esc(order.courier_tracking)}</b></p>` : ""}
+      ${pay ? `<a href="${pay.upi}" class="paybtn">💳 Pay ₹${esc(pay.amount)} now</a><p class="muted small" style="margin:6px 0 0;text-align:center">Courier orders are prepaid — pay to confirm your shipment.</p>` : ""}
       ${imgs ? `<h2>Your photos</h2><div class="pthumbs">${imgs}</div>` : ""}
       ${order.address ? `<p class="muted" style="margin-top:8px">${esc(order.address)}</p>` : ""}
     </div>
@@ -879,7 +886,7 @@ async function ordersTab(container) {
 }
 
 async function adminOrder(id) {
-  const { order, customer, allowedNext, captains = [] } = await api(`/api/admin/orders/${id}`);
+  const { order, customer, allowedNext, captains = [], fulfilment = "delivery" } = await api(`/api/admin/orders/${id}`);
   const items = order.items
     .map((i) => `<li>${esc(i.name)} × ${i.qty}${i.unit_price ? ` <span class="muted">— ${money(i.qty * i.unit_price)}</span>` : ""}</li>`)
     .join("");
@@ -902,22 +909,33 @@ async function adminOrder(id) {
     let agentField = "";
     // Show the agent picker when this step is a flow assignment point.
     const asg = (CFG.flow.assignments || []).find((a) => a.at === next);
+    const courierable = asg && asg.role === "delivery" && (fulfilment === "courier" || fulfilment === "both");
     if (asg) {
       const term = CFG.brand?.agentTerm || "agent";
       const isDelivery = asg.slot === "delivery";
       const label = `Assign ${term.toLowerCase()}`;
       const current = isDelivery ? order.delivery_captain_name : order.agent_name;
+      let picker;
       if (captains.length) {
         const opts = `<option value="">Select…</option>` +
           captains.map((c) => `<option value="${c.id}" data-name="${esc(c.name || "")}" data-phone="${esc(c.phone || "")}" ${current === c.name ? "selected" : ""}>${esc(c.name || term)}${c.phone ? " · " + esc(c.phone) : ""}</option>`).join("");
-        agentField = `<label>${label}</label><select id="agent">${opts}</select>`;
+        picker = `<select id="agent">${opts}</select>`;
       } else {
-        agentField = `<label>${label}</label><p class="muted">No ${term.toLowerCase()}s for this provider yet — add them in Providers → Edit → Captains.</p><input id="agent" value="${esc(current || "")}" placeholder="${term} name" />`;
+        picker = `<p class="muted">No ${term.toLowerCase()}s for this provider yet — add them in Providers → Edit → Captains.</p><input id="agent" value="${esc(current || "")}" placeholder="${term} name" />`;
+      }
+      if (courierable) {
+        const startCourier = fulfilment === "courier";
+        agentField = `
+          ${fulfilment === "both" ? `<label>Fulfilment</label><div class="row" style="gap:6px;margin-bottom:6px"><button type="button" class="ghost small grow0 fmode${startCourier ? "" : " sel"}" data-mode="delivery">🛵 Own agent</button><button type="button" class="ghost small grow0 fmode${startCourier ? " sel" : ""}" data-mode="courier">📦 Courier</button></div>` : ""}
+          <div id="deliverFields" style="display:${startCourier ? "none" : "block"}"><label>${label}</label>${picker}</div>
+          <div id="courierFields" style="display:${startCourier ? "block" : "none"}"><label>Courier company</label><input id="courierName" value="${esc(order.courier_name || "")}" placeholder="DTDC, Delhivery, India Post…" /><label style="margin-top:6px">Tracking number</label><input id="courierTracking" value="${esc(order.courier_tracking || "")}" placeholder="Consignment / AWB number" /></div>`;
+      } else {
+        agentField = `<label>${label}</label>${picker}`;
       }
     }
     controls = `
       ${agentField}
-      <button id="save" data-next="${next}" style="margin-top:12px">Advance to ${nextLabel} & notify</button>
+      <button id="save" data-next="${next}" data-courierable="${courierable ? 1 : 0}" data-start="${courierable && fulfilment === "courier" ? "courier" : "delivery"}" style="margin-top:12px">Advance to ${nextLabel} & notify</button>
       <p id="msg"></p>`;
   } else {
     controls = `<p class="muted">${order.status === "REJECTED" ? "This request was rejected — no further action." : "Order delivered — complete."}</p>`;
@@ -929,6 +947,7 @@ async function adminOrder(id) {
       ${badge(order.status)}
       ${order.agent_name ? `<p class="muted" style="margin-top:8px">🔧 ${esc(CFG.brand?.agentTerm || "Technician")}: ${esc(order.agent_name)}${order.captain_phone ? ` · <a href="tel:${esc(order.captain_phone)}">${esc(order.captain_phone)}</a>` : ""}</p>` : ""}
       ${order.delivery_captain_name ? `<p class="muted" style="margin-top:4px">🛵 ${esc(order.delivery_captain_name)}${order.delivery_captain_phone ? ` · <a href="tel:${esc(order.delivery_captain_phone)}">${esc(order.delivery_captain_phone)}</a>` : ""}</p>` : ""}
+      ${order.ship_mode === "courier" && order.courier_name ? `<p class="muted" style="margin-top:4px">📦 ${esc(order.courier_name)}${order.courier_tracking ? ` · Tracking ${esc(order.courier_tracking)}` : ""}</p>` : ""}
       <h2>Customer</h2>
       <p>${esc(customer?.name || "—")} · ${esc(customer?.wa_phone || "")}</p>
       ${order.contact_name || order.contact_phone ? `<p class="muted">Pickup contact: ${esc(order.contact_name || "")}${order.contact_phone ? " · " + esc(order.contact_phone) : ""}</p>` : ""}
@@ -941,16 +960,25 @@ async function adminOrder(id) {
     <div class="card"><h2>History</h2><ul class="timeline">${tl}</ul></div>`);
   document.getElementById("back").onclick = () => renderDashboard("orders");
 
-  const patch = async (status, agentName, captainPhone) => {
+  const patch = async (status, agentName, captainPhone, courier) => {
     const msg = document.getElementById("msg");
     try {
-      await api(`/api/admin/orders/${id}/status`, { method: "PATCH", body: { status, agentName, captainPhone } });
+      await api(`/api/admin/orders/${id}/status`, { method: "PATCH", body: { status, agentName, captainPhone, ...(courier || {}) } });
       adminOrder(id); // reload with the new status + controls
     } catch (e) {
       msg.className = "err";
       msg.textContent = e.message === "invalid_transition" ? "That status change isn't allowed." : e.message;
     }
   };
+  // Delivery ↔ courier toggle (rendered only when the provider allows courier).
+  let shipMode = document.getElementById("save")?.dataset.start === "courier" ? "courier" : "delivery";
+  document.querySelectorAll(".fmode").forEach((b) => (b.onclick = () => {
+    shipMode = b.dataset.mode;
+    document.querySelectorAll(".fmode").forEach((x) => x.classList.toggle("sel", x === b));
+    const df = document.getElementById("deliverFields"), cf = document.getElementById("courierFields");
+    if (df) df.style.display = shipMode === "courier" ? "none" : "block";
+    if (cf) cf.style.display = shipMode === "courier" ? "block" : "none";
+  }));
 
   const acceptBtn = document.getElementById("accept");
   if (acceptBtn) {
@@ -962,6 +990,13 @@ async function adminOrder(id) {
   const saveBtn = document.getElementById("save");
   if (saveBtn) {
     saveBtn.onclick = () => {
+      if (saveBtn.dataset.courierable === "1" && shipMode === "courier") {
+        const cn = document.getElementById("courierName")?.value.trim() || "";
+        const ct = document.getElementById("courierTracking")?.value.trim() || "";
+        if (!cn) { const m = document.getElementById("msg"); m.className = "err"; m.textContent = "Enter the courier company."; return; }
+        patch(saveBtn.dataset.next, "", "", { shipMode: "courier", courierName: cn, courierTracking: ct });
+        return;
+      }
       const elc = document.getElementById("agent");
       let agentName = "", captainPhone = "";
       if (elc) {

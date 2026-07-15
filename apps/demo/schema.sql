@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS service_providers (
   wa_token           TEXT,                       -- optional per-provider access token override
   config             TEXT NOT NULL DEFAULT '{}', -- JSON: labels, currency, template names
   photo_order        INTEGER NOT NULL DEFAULT 0,  -- 1 = customer can upload a photo/list; Groq extracts items
+  fulfilment         TEXT NOT NULL DEFAULT 'delivery', -- 'delivery' | 'courier' | 'both' (how orders leave the shop)
   upi_id             TEXT,                        -- VPA for collecting payment (e.g. name@okhdfcbank)
   upi_name           TEXT,                        -- payee name shown in the UPI app
   created_at         INTEGER NOT NULL
@@ -182,6 +183,9 @@ CREATE TABLE IF NOT EXISTS orders (
   captain_phone TEXT,                    -- PICKUP captain phone (snapshot)
   delivery_captain_name  TEXT,           -- DELIVERY captain name (assigned at OUT_FOR_DELIVERY)
   delivery_captain_phone TEXT,           -- DELIVERY captain phone (snapshot)
+  ship_mode      TEXT,                   -- 'delivery' | 'courier' (chosen at dispatch)
+  courier_name   TEXT,                   -- courier company when ship_mode = 'courier' (DTDC, Delhivery…)
+  courier_tracking TEXT,                 -- courier tracking / consignment number
   payment_status TEXT,                   -- 'paid' | 'failed' | null (from settlement email)
   payment_ref    TEXT,                   -- gateway txn / order id
   payment_amount INTEGER,                -- amount received, in paise
