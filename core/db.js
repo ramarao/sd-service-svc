@@ -380,10 +380,11 @@ export async function createOrder(db, { providerId, customerId, address, lat, ln
   return getOrder(db, id);
 }
 
-// Replace an order's items wholesale (used by the pickup captain to reconcile
-// to what was actually collected). Prices are re-resolved from the provider's
-// catalog — never trust client-sent prices.
-export async function replaceOrderItems(db, orderId, providerId, items) {
+// Replace an order's items wholesale. Prices default to the provider's catalog,
+// but the admin may set an explicit per-item price (`price`, in paise) — used to
+// quote photo/list orders whose items aren't on the menu. `allowPrice` gates this
+// (captain reconciliation must NOT trust client prices; admin pricing may).
+export async function replaceOrderItems(db, orderId, providerId, items, allowPrice = false) {
   const { results: catalog } = await db
     .prepare("SELECT name, price FROM catalog_items WHERE provider_id = ?")
     .bind(providerId)
@@ -393,7 +394,9 @@ export async function replaceOrderItems(db, orderId, providerId, items) {
   for (const it of items || []) {
     if (!it?.name) continue;
     const qty = Math.max(1, parseInt(it.qty, 10) || 1);
-    const unit = priceOf.get(String(it.name).toLowerCase()) ?? 0;
+    const unit = allowPrice && it.price != null
+      ? Math.max(0, parseInt(it.price, 10) || 0)
+      : (priceOf.get(String(it.name).toLowerCase()) ?? 0);
     stmts.push(
       db
         .prepare("INSERT INTO order_items (id, order_id, name, qty, unit_price) VALUES (?,?,?,?,?)")

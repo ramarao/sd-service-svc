@@ -4,14 +4,18 @@
 // Payment is collected on delivery.
 export default {
   agentTerm: "Delivery agent",
-  statuses: ["REQUESTED", "ACCEPTED", "PREPARING", "OUT_FOR_DELIVERY", "DELIVERED"],
+  statuses: ["REQUESTED", "QUOTED", "ACCEPTED", "PREPARING", "OUT_FOR_DELIVERY", "DELIVERED"],
   terminal: ["REJECTED", "DELIVERED"],
   decision: { from: "REQUESTED", accept: "ACCEPTED", reject: "REJECTED" },
-  notify: ["ACCEPTED", "REJECTED", "PREPARING", "OUT_FOR_DELIVERY", "DELIVERED"],
+  // Quote-and-confirm branch (photo/list orders): the shop prices the order and
+  // sends it (REQUESTED→QUOTED); the customer then approves or rejects.
+  extraTransitions: [["REQUESTED", "QUOTED"], ["QUOTED", "ACCEPTED"], ["QUOTED", "REJECTED"]],
+  notify: ["QUOTED", "ACCEPTED", "REJECTED", "PREPARING", "OUT_FOR_DELIVERY", "DELIVERED"],
   labels: {
     REQUESTED: "We received your order",
-    ACCEPTED: "Your order has been accepted",
-    REJECTED: "Sorry, we couldn't accept your order this time",
+    QUOTED: "Your order has been priced — please review and confirm",
+    ACCEPTED: "Your order is confirmed",
+    REJECTED: "Order cancelled",
     PREPARING: "The shop is preparing your order",
     OUT_FOR_DELIVERY: "Your order is out for delivery",
     DELIVERED: "Delivered — thank you!",

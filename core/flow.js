@@ -28,6 +28,9 @@ export function isTerminal(flow, s) {
 export function canTransition(flow, from, to) {
   if (from === to) return false;
   if (isTerminal(flow, from)) return false;
+  // Explicit branches beyond the linear+decision model (e.g. REQUESTED→QUOTED,
+  // QUOTED→ACCEPTED/REJECTED for the quote-and-confirm path).
+  if ((flow.extraTransitions || []).some(([f, t]) => f === from && t === to)) return true;
   const dec = flow.decision;
   if (dec && (to === dec.accept || to === dec.reject)) return from === dec.from;
   const rank = rankMap(flow);
@@ -40,9 +43,10 @@ export function canTransition(flow, from, to) {
 // Valid next statuses from a given status (drives the admin UI controls).
 export function allowedTransitions(flow, from) {
   if (isTerminal(flow, from)) return [];
+  const extra = (flow.extraTransitions || []).filter(([f]) => f === from).map(([, t]) => t);
   const dec = flow.decision;
-  if (dec && from === dec.from) return [dec.accept, dec.reject];
-  return flow.statuses.filter((s) => canTransition(flow, from, s));
+  if (dec && from === dec.from) return [...new Set([...extra, dec.accept, dec.reject])];
+  return [...new Set([...extra, ...flow.statuses.filter((s) => canTransition(flow, from, s))])];
 }
 
 // Statuses that trigger a customer WhatsApp notification.

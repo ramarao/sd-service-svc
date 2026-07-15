@@ -225,16 +225,19 @@ async function orderDetail(id) {
   // Before accepting, the manager can reconcile the item list — essential for
   // photo/list orders where Groq guessed the items. Editable only at REQUESTED.
   const editable = order.status === "REQUESTED";
-  let draftItems = (order.items || []).map((i) => ({ name: i.name, qty: i.qty }));
+  const isPhoto = (order.images || []).length > 0; // photo/list order → quote-and-confirm
+  let draftItems = (order.items || []).map((i) => ({ name: i.name, qty: i.qty, price: i.unit_price || 0 }));
   const paymentLine = order.payment_status
     ? `<p class="small" style="margin:8px 0 0">${order.payment_status === "paid" ? "✅ <b>Paid</b>" : "❌ <b>Payment failed</b>"}${order.payment_amount ? " · " + money(order.payment_amount) : ""}${order.payment_payer ? " · " + esc(order.payment_payer) : ""}${order.payment_ref ? ` <span class="muted">(ref ${esc(order.payment_ref)})</span>` : ""}</p>`
     : `<p class="muted small" style="margin:8px 0 0">Payment: awaiting</p>`;
   const itemsCardHtml = editable
-    ? `<div class="card"><h2 style="margin-top:0">Items <span class="muted small">— review before accepting</span></h2>
+    ? `<div class="card"><h2 style="margin-top:0">Items <span class="muted small">— review${isPhoto ? " &amp; price" : ""} before ${isPhoto ? "quoting" : "accepting"}</span></h2>
         <div id="edititems"></div>
+        <div class="row" style="align-items:baseline;margin-top:8px"><strong style="flex:1">Total</strong><strong id="draftTotal" style="font-size:16px">${money(0)}</strong></div>
         <div class="row" style="gap:6px;margin-top:10px;align-items:flex-end">
           <div style="flex:1"><label>Add item</label><input id="ni_name" placeholder="e.g. Tomato" /></div>
-          <div><label>Qty</label><input id="ni_qty" type="number" min="1" value="1" style="width:64px" /></div>
+          <div><label>Qty</label><input id="ni_qty" type="number" min="1" value="1" style="width:56px" /></div>
+          <div><label>₹</label><input id="ni_price" type="number" min="0" step="0.01" placeholder="0" style="width:70px" /></div>
           <button class="grow0 ghost small" id="ni_add">Add</button>
         </div>
         <p id="imsg" class="small"></p></div>`
@@ -248,7 +251,9 @@ async function orderDetail(id) {
 
   let controls;
   if (order.status === "REQUESTED") {
-    controls = `<p class="muted">Awaiting your decision.</p><div class="row"><button id="accept">Accept</button><button id="reject" class="ghost">Reject</button></div><p id="msg"></p>`;
+    controls = `<p class="muted">${isPhoto ? "Price the items, then send the quote to the customer to confirm." : "Awaiting your decision."}</p><div class="row"><button id="accept">${isPhoto ? "Price &amp; send quote" : "Accept"}</button><button id="reject" class="ghost">Reject</button></div><p id="msg"></p>`;
+  } else if (order.status === "QUOTED") {
+    controls = `<p class="muted">⏳ Quote sent — awaiting the customer's confirmation.</p><p id="msg"></p>`;
   } else if (allowedNext.length) {
     const next = allowedNext[0];
     let agentField = "";
@@ -328,28 +333,31 @@ async function orderDetail(id) {
   // Editable item list (photo/list-order reconciliation) — only at REQUESTED.
   if (editable) {
     const box = document.getElementById("edititems");
+    const recalcDraft = () => { const el = document.getElementById("draftTotal"); if (el) el.textContent = money(draftItems.reduce((s, it) => s + (it.price || 0) * it.qty, 0)); };
     const paint = () => {
       box.innerHTML = draftItems.length
         ? draftItems
-            .map((it, idx) => `<div class="summary-line" data-idx="${idx}"><span style="flex:1">${esc(it.name)}</span><div class="qtyctrl"><button type="button" class="qbtn dminus">−</button><input class="qnum dqty" type="number" min="1" value="${it.qty}" style="width:52px" /><button type="button" class="qbtn dplus">+</button></div><button type="button" class="qbtn drm" title="Remove" style="margin-left:6px">✕</button></div>`)
+            .map((it, idx) => `<div class="summary-line" data-idx="${idx}"><span style="flex:1">${esc(it.name)}</span><input class="dprice" type="number" min="0" step="0.01" value="${it.price ? (it.price / 100) : ""}" placeholder="₹" style="width:64px;margin-right:6px" title="Price each" /><div class="qtyctrl"><button type="button" class="qbtn dminus">−</button><input class="qnum dqty" type="number" min="1" value="${it.qty}" style="width:46px" /><button type="button" class="qbtn dplus">+</button></div><button type="button" class="qbtn drm" title="Remove" style="margin-left:6px">✕</button></div>`)
             .join("")
-        : '<p class="muted small">No items — add at least one before accepting.</p>';
+        : '<p class="muted small">No items — add at least one.</p>';
       box.querySelectorAll(".summary-line").forEach((row) => {
         const idx = +row.dataset.idx;
-        const num = row.querySelector(".dqty");
+        const num = row.querySelector(".dqty"), pr = row.querySelector(".dprice");
         row.querySelector(".dplus").onclick = () => { draftItems[idx].qty++; paint(); };
         row.querySelector(".dminus").onclick = () => { draftItems[idx].qty = Math.max(1, draftItems[idx].qty - 1); paint(); };
-        num.onchange = () => { draftItems[idx].qty = Math.max(1, parseInt(num.value, 10) || 1); };
+        num.onchange = () => { draftItems[idx].qty = Math.max(1, parseInt(num.value, 10) || 1); recalcDraft(); };
+        pr.onchange = () => { draftItems[idx].price = Math.round((parseFloat(pr.value) || 0) * 100); recalcDraft(); };
         row.querySelector(".drm").onclick = () => { draftItems.splice(idx, 1); paint(); };
       });
+      recalcDraft();
     };
     paint();
     document.getElementById("ni_add").onclick = () => {
-      const n = document.getElementById("ni_name"), q = document.getElementById("ni_qty");
+      const n = document.getElementById("ni_name"), q = document.getElementById("ni_qty"), p = document.getElementById("ni_price");
       const name = n.value.trim();
       if (!name) return;
-      draftItems.push({ name, qty: Math.max(1, parseInt(q.value, 10) || 1) });
-      n.value = ""; q.value = "1"; paint();
+      draftItems.push({ name, qty: Math.max(1, parseInt(q.value, 10) || 1), price: Math.round((parseFloat(p.value) || 0) * 100) });
+      n.value = ""; q.value = "1"; p.value = ""; paint();
     };
   }
 
@@ -357,15 +365,16 @@ async function orderDetail(id) {
   if (acc) {
     acc.onclick = async () => {
       const imsg = document.getElementById("imsg");
-      if (!draftItems.length) { if (imsg) { imsg.className = "small err"; imsg.textContent = "Add at least one item before accepting."; } return; }
+      if (!draftItems.length) { if (imsg) { imsg.className = "small err"; imsg.textContent = "Add at least one item."; } return; }
       try {
-        // Persist the reconciled item list, then accept in one tap.
-        await api(`/api/admin/orders/${encodeURIComponent(id)}/items`, { method: "PATCH", body: { items: draftItems.map((i) => ({ name: i.name, qty: i.qty })) } });
+        // Persist the reconciled + priced item list, then quote/accept in one tap.
+        await api(`/api/admin/orders/${encodeURIComponent(id)}/items`, { method: "PATCH", body: { items: draftItems.map((i) => ({ name: i.name, qty: i.qty, price: i.price || 0 })) } });
       } catch (e) {
         if (imsg) { imsg.className = "small err"; imsg.textContent = e.message === "not_editable" ? "Order already moved on." : e.message; }
         return;
       }
-      patch("ACCEPTED");
+      // Photo/list order → send a quote for the customer to confirm; else accept outright.
+      patch(isPhoto ? "QUOTED" : "ACCEPTED");
     };
     document.getElementById("reject").onclick = () => { if (confirm("Reject this request? Final.")) patch("REJECTED"); };
   }

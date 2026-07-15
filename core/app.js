@@ -787,6 +787,25 @@ app.get("/api/my/orders/:id", requireRole("customer"), async (c) => {
   return c.json({ order, pay });
 });
 
+// Customer accepts or rejects a quoted (priced) order. Their call alone advances
+// QUOTED → ACCEPTED or → REJECTED (final).
+app.post("/api/my/orders/:id/confirm", requireRole("customer"), async (c) => {
+  const sess = c.get("session");
+  const { accept } = await c.req.json().catch(() => ({}));
+  const order = await c.env.DB.prepare("SELECT * FROM orders WHERE id = ?").bind(c.req.param("id")).first();
+  if (!order || order.customer_id !== sess.customer_id) return c.json({ error: "not_found" }, 404);
+  if (order.status !== "QUOTED") return c.json({ error: "not_quoted" }, 409);
+  const flow = flowForProvider(await getProvider(c.env.DB, order.provider_id));
+  const to = accept ? flow.decision.accept : flow.decision.reject;
+  try {
+    const updated = await transitionOrder(c.env, c.env.DB, { orderId: order.id, toStatus: to, actor: "customer" });
+    await notifyOrders(c.env, order.provider_id);
+    return c.json({ ok: true, order: updated });
+  } catch (e) {
+    return c.json({ error: e.message }, 400);
+  }
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Admin (provider) API — scoped to the admin's own provider_id
 // ─────────────────────────────────────────────────────────────────────────────
@@ -897,6 +916,8 @@ app.patch("/api/admin/orders/:id/status", requireRole("admin", "super_admin", "m
   const scope = providerScope(sess);
   if (sess.role !== "super_admin" && !scope) return c.json({ error: "forbidden" }, 403);
   if (scope && order.provider_id !== scope) return c.json({ error: "forbidden" }, 403);
+  // A quoted order is the customer's to accept/reject — the shop can't self-confirm.
+  if (order.status === "QUOTED") return c.json({ error: "awaiting_customer" }, 409);
 
   try {
     const updated = await transitionOrder(c.env, c.env.DB, {
@@ -929,7 +950,8 @@ app.patch("/api/admin/orders/:id/items", requireRole("admin", "super_admin", "ma
   if (scope && order.provider_id !== scope) return c.json({ error: "forbidden" }, 403);
   if (order.status !== "REQUESTED") return c.json({ error: "not_editable" }, 409);
   if (!Array.isArray(items) || items.length === 0) return c.json({ error: "no_items" }, 400);
-  await replaceOrderItems(c.env.DB, order.id, order.provider_id, items);
+  // Admin may set explicit prices here (to quote photo/list items not on the menu).
+  await replaceOrderItems(c.env.DB, order.id, order.provider_id, items, true);
   return c.json({ ok: true, order: await getOrder(c.env.DB, order.id) });
 });
 

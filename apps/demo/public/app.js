@@ -712,11 +712,14 @@ async function customerTrack(id) {
     ? (order.courier_name ? `<span class="muted">· 📦 ${esc(order.courier_name)}${order.courier_tracking ? ` · ${esc(order.courier_tracking)}` : ""}</span>` : `<span class="muted">· 📦 Courier</span>`)
     : order.agent_name ? `<span class="muted">· 🔧 ${esc(CFG.brand?.agentTerm || "Technician")}: ${esc(order.agent_name)}</span>`
     : order.delivery_captain_name ? `<span class="muted">· 🛵 ${esc(order.delivery_captain_name)}</span>` : "";
+  const quoted = order.status === "QUOTED";
   h(`
     <div class="topbar"><h1>Order ${esc(order.id)}</h1><button class="ghost small" id="back">← Back</button></div>
     <div class="card">${badge(order.status)} ${dispatchLine}
+      ${quoted ? `<p class="small" style="margin:8px 0 0">The shop has priced your order. Please review and confirm.</p>` : ""}
       <h2>Items</h2><ul>${items}</ul>
       <div class="row" style="align-items:baseline"><strong style="flex:1">Total</strong><strong style="flex:0 0 auto;font-size:17px">${money(order.total)}</strong></div>
+      ${quoted ? `<div class="row" style="gap:8px;margin-top:12px"><button id="qaccept">✅ Accept order</button><button id="qreject" class="ghost">Reject</button></div><p id="qmsg" class="small"></p>` : ""}
       ${courier && order.courier_tracking ? `<p class="small" style="margin-top:8px">📦 Shipped via <b>${esc(order.courier_name || "courier")}</b> · Tracking <b>${esc(order.courier_tracking)}</b></p>` : ""}
       ${pay ? `<a href="${pay.upi}" class="paybtn">💳 Pay ₹${esc(pay.amount)} now</a><p class="muted small" style="margin:6px 0 0;text-align:center">Courier orders are prepaid — pay to confirm your shipment.</p>` : ""}
       ${imgs ? `<h2>Your photos</h2><div class="pthumbs">${imgs}</div>` : ""}
@@ -724,6 +727,15 @@ async function customerTrack(id) {
     </div>
     <div class="card"><h2>Progress</h2><ul class="timeline">${tl}</ul></div>`);
   document.getElementById("back").onclick = () => history.back();
+  if (quoted) {
+    const confirm2 = async (accept) => {
+      const m = document.getElementById("qmsg");
+      try { await api(`/api/my/orders/${id}/confirm`, { method: "POST", body: { accept } }); customerTrack(id); }
+      catch (e) { m.className = "small err"; m.textContent = e.message; }
+    };
+    document.getElementById("qaccept").onclick = () => confirm2(true);
+    document.getElementById("qreject").onclick = () => { if (confirm("Reject this order? This cannot be undone.")) confirm2(false); };
+  }
 }
 
 // ── Admin (provider) ─────────────────────────────────────────────────────────
@@ -887,6 +899,8 @@ async function ordersTab(container) {
 
 async function adminOrder(id) {
   const { order, customer, allowedNext, captains = [], fulfilment = "delivery" } = await api(`/api/admin/orders/${id}`);
+  const isPhoto = (order.images || []).length > 0; // photo/list order → quote-and-confirm
+  let draftItems = (order.items || []).map((i) => ({ name: i.name, qty: i.qty, price: i.unit_price || 0 }));
   const items = order.items
     .map((i) => `<li>${esc(i.name)} × ${i.qty}${i.unit_price ? ` <span class="muted">— ${money(i.qty * i.unit_price)}</span>` : ""}</li>`)
     .join("");
@@ -897,12 +911,22 @@ async function adminOrder(id) {
   let controls;
   if (order.status === "REQUESTED") {
     controls = `
-      <p class="muted">This request is awaiting your decision.</p>
-      <div class="row">
-        <button id="accept">Accept</button>
+      <p class="muted">${isPhoto ? "Review the items, set a price on each, then send the quote to the customer to confirm." : "This request is awaiting your decision."}</p>
+      <div id="edititems"></div>
+      <div class="row" style="align-items:baseline;margin-top:8px"><strong style="flex:1">Total</strong><strong id="draftTotal" style="font-size:16px">${money(0)}</strong></div>
+      <div class="row" style="gap:6px;margin-top:10px;align-items:flex-end">
+        <div style="flex:1"><label>Add item</label><input id="ni_name" placeholder="e.g. Tomato" /></div>
+        <div><label>Qty</label><input id="ni_qty" type="number" min="1" value="1" style="width:56px" /></div>
+        <div><label>₹</label><input id="ni_price" type="number" min="0" step="0.01" placeholder="0" style="width:70px" /></div>
+        <button class="grow0 ghost small" id="ni_add">Add</button>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <button id="accept">${isPhoto ? "Price & send quote" : "Accept"}</button>
         <button id="reject" class="ghost">Reject</button>
       </div>
       <p id="msg"></p>`;
+  } else if (order.status === "QUOTED") {
+    controls = `<p class="muted">⏳ Quote sent — awaiting the customer's confirmation.</p><p id="msg"></p>`;
   } else if (allowedNext.length) {
     const next = allowedNext[0]; // single forward step
     const nextLabel = next.replace(/_/g, " ");
@@ -987,9 +1011,44 @@ async function adminOrder(id) {
     if (cf) cf.style.display = shipMode === "courier" ? "block" : "none";
   }));
 
+  // REQUESTED item editor (reconcile + price) — mirrors the manager app.
+  const ebox = document.getElementById("edititems");
+  if (ebox) {
+    const recalcDraft = () => { const el = document.getElementById("draftTotal"); if (el) el.textContent = money(draftItems.reduce((s, it) => s + (it.price || 0) * it.qty, 0)); };
+    const paint = () => {
+      ebox.innerHTML = draftItems.length
+        ? draftItems.map((it, idx) => `<div class="summary-line" data-idx="${idx}"><span style="flex:1">${esc(it.name)}</span><input class="dprice" type="number" min="0" step="0.01" value="${it.price ? (it.price / 100) : ""}" placeholder="₹" style="width:64px;margin-right:6px" /><div class="qtyctrl"><button type="button" class="qbtn dminus">−</button><input class="qnum dqty" type="number" min="1" value="${it.qty}" style="width:46px" /><button type="button" class="qbtn dplus">+</button></div><button type="button" class="qbtn drm" style="margin-left:6px">✕</button></div>`).join("")
+        : '<p class="muted small">No items — add at least one.</p>';
+      ebox.querySelectorAll(".summary-line").forEach((row) => {
+        const idx = +row.dataset.idx, num = row.querySelector(".dqty"), pr = row.querySelector(".dprice");
+        row.querySelector(".dplus").onclick = () => { draftItems[idx].qty++; paint(); };
+        row.querySelector(".dminus").onclick = () => { draftItems[idx].qty = Math.max(1, draftItems[idx].qty - 1); paint(); };
+        num.onchange = () => { draftItems[idx].qty = Math.max(1, parseInt(num.value, 10) || 1); recalcDraft(); };
+        pr.onchange = () => { draftItems[idx].price = Math.round((parseFloat(pr.value) || 0) * 100); recalcDraft(); };
+        row.querySelector(".drm").onclick = () => { draftItems.splice(idx, 1); paint(); };
+      });
+      recalcDraft();
+    };
+    paint();
+    document.getElementById("ni_add").onclick = () => {
+      const n = document.getElementById("ni_name"), q = document.getElementById("ni_qty"), p = document.getElementById("ni_price");
+      const name = n.value.trim();
+      if (!name) return;
+      draftItems.push({ name, qty: Math.max(1, parseInt(q.value, 10) || 1), price: Math.round((parseFloat(p.value) || 0) * 100) });
+      n.value = ""; q.value = "1"; p.value = ""; paint();
+    };
+  }
+
   const acceptBtn = document.getElementById("accept");
   if (acceptBtn) {
-    acceptBtn.onclick = () => patch("ACCEPTED");
+    acceptBtn.onclick = async () => {
+      const msg = document.getElementById("msg");
+      if (!draftItems.length) { msg.className = "err"; msg.textContent = "Add at least one item."; return; }
+      try {
+        await api(`/api/admin/orders/${id}/items`, { method: "PATCH", body: { items: draftItems.map((i) => ({ name: i.name, qty: i.qty, price: i.price || 0 })) } });
+      } catch (e) { msg.className = "err"; msg.textContent = e.message === "not_editable" ? "Order already moved on." : e.message; return; }
+      patch(isPhoto ? "QUOTED" : "ACCEPTED");
+    };
     document.getElementById("reject").onclick = () => {
       if (confirm("Reject this request? This is final — no further action can be taken.")) patch("REJECTED");
     };
