@@ -138,6 +138,8 @@ export async function deployTown(env, db, target, spec, { dryRun = true } = {}) 
     // Backfill: pre-decoupling rows used slug as the flow key. Safe to re-run.
     "UPDATE verticals SET flow = slug WHERE flow IS NULL OR flow = ''",
     "ALTER TABLE catalog_items ADD COLUMN available INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE catalog_items ADD COLUMN description TEXT",
+    "ALTER TABLE catalog_items ADD COLUMN image TEXT",
     "ALTER TABLE service_providers ADD COLUMN fulfilment TEXT NOT NULL DEFAULT 'delivery'",
     "ALTER TABLE service_providers ADD COLUMN code TEXT",
     "ALTER TABLE orders ADD COLUMN ship_mode TEXT",

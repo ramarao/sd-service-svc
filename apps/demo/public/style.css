@@ -311,7 +311,8 @@ button:disabled { opacity: 0.5; cursor: default; }
   transition: background 0.12s ease;
 }
 .pick-row.picked { background: color-mix(in srgb, var(--accent) 9%, transparent); }
-.pick-info { min-width: 0; }
+.pick-img { width: 46px; height: 46px; object-fit: cover; border-radius: 8px; flex: 0 0 auto; }
+.pick-info { min-width: 0; flex: 1; }
 .pick-info strong { font-size: 14.5px; }
 .qtyctrl { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
 .qbtn {

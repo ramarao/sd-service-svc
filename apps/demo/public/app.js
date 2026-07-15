@@ -234,7 +234,8 @@ async function customerNewOrder(slug, provider) {
           .map((ci) => {
             const off = ci.available === 0;
             return `<div class="pick-row${off ? " pick-off" : ""}" data-name="${esc(ci.name)}" data-cat="${esc(g)}" data-price="${ci.price || 0}">
-              <div class="pick-info"><strong>${esc(ci.name)}</strong>${off ? ` <span class="muted small">· out of stock</span>` : ""}<br><span class="muted">${money(ci.price || 0, cur)} · ${esc(ci.unit)}</span></div>
+              ${ci.image ? `<img class="pick-img" src="${ci.image}" alt="${esc(ci.name)}" />` : ""}
+              <div class="pick-info"><strong>${esc(ci.name)}</strong>${off ? ` <span class="muted small">· out of stock</span>` : ""}<br><span class="muted">${money(ci.price || 0, cur)} · ${esc(ci.unit)}</span>${ci.description ? `<br><span class="muted small">${esc(ci.description)}</span>` : ""}</div>
               ${off ? "" : `<div class="qtyctrl">
                 <button type="button" class="qbtn qminus">−</button>
                 <input class="qnum" type="number" min="0" value="0" inputmode="numeric" />

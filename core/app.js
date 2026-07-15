@@ -600,7 +600,7 @@ app.get("/api/providers/:slug", async (c) => {
   const provider = await getProviderBySlug(c.env.DB, c.req.param("slug"));
   if (!provider) return c.json({ error: "not_found" }, 404);
   const { results: catalog } = await c.env.DB.prepare(
-    "SELECT id, name, category, unit, price, available FROM catalog_items WHERE provider_id = ? AND active = 1 ORDER BY category, name"
+    "SELECT id, name, category, unit, price, available, description, image FROM catalog_items WHERE provider_id = ? AND active = 1 ORDER BY category, name"
   )
     .bind(provider.id)
     .all();
@@ -1377,30 +1377,34 @@ app.patch("/api/control/providers/:id", requireControlToken, async (c) => {
 
 // Catalog per provider.
 app.get("/api/control/providers/:id/catalog", requireControlToken, async (c) => {
-  const { results } = await c.env.DB.prepare("SELECT id, name, category, unit, price, active, available FROM catalog_items WHERE provider_id = ? ORDER BY category, name").bind(c.req.param("id")).all();
+  const { results } = await c.env.DB.prepare("SELECT id, name, category, unit, price, active, available, description, image FROM catalog_items WHERE provider_id = ? ORDER BY category, name").bind(c.req.param("id")).all();
   return c.json({ catalog: results || [] });
 });
 app.patch("/api/control/providers/:id/catalog/:itemId", requireControlToken, async (c) => {
   const b = await c.req.json().catch(() => ({}));
   const cur = await c.env.DB.prepare("SELECT * FROM catalog_items WHERE id = ? AND provider_id = ?").bind(c.req.param("itemId"), c.req.param("id")).first();
   if (!cur) return c.json({ error: "not_found" }, 404);
-  await c.env.DB.prepare("UPDATE catalog_items SET name=?, category=?, unit=?, price=?, available=? WHERE id=?")
+  const image = b.image !== undefined ? (typeof b.image === "string" && b.image.startsWith("data:image/") && b.image.length < 900_000 ? b.image : (b.image ? cur.image : null)) : cur.image;
+  await c.env.DB.prepare("UPDATE catalog_items SET name=?, category=?, unit=?, price=?, available=?, description=?, image=? WHERE id=?")
     .bind(
       b.name?.trim() || cur.name,
       b.category !== undefined ? (b.category?.trim() || null) : cur.category,
       b.unit?.trim() || cur.unit,
       b.price !== undefined ? Math.max(0, parseInt(b.price, 10) || 0) : cur.price,
       b.available !== undefined ? (b.available ? 1 : 0) : (cur.available ?? 1),
+      b.description !== undefined ? (b.description?.trim() || null) : cur.description,
+      image,
       cur.id
     ).run();
   return c.json({ ok: true });
 });
 app.post("/api/control/providers/:id/catalog", requireControlToken, async (c) => {
-  const { name, category, unit, price } = await c.req.json().catch(() => ({}));
+  const { name, category, unit, price, description, image } = await c.req.json().catch(() => ({}));
   if (!name) return c.json({ error: "missing" }, 400);
+  const img = typeof image === "string" && image.startsWith("data:image/") && image.length < 900_000 ? image : null;
   const id = randomId();
-  await c.env.DB.prepare("INSERT INTO catalog_items (id, provider_id, name, category, unit, price, active) VALUES (?,?,?,?,?,?,1)")
-    .bind(id, c.req.param("id"), name, category?.trim() || null, unit || "piece", parseInt(price, 10) || 0).run();
+  await c.env.DB.prepare("INSERT INTO catalog_items (id, provider_id, name, category, unit, price, active, description, image) VALUES (?,?,?,?,?,?,1,?,?)")
+    .bind(id, c.req.param("id"), name, category?.trim() || null, unit || "piece", parseInt(price, 10) || 0, description?.trim() || null, img).run();
   await ensureCategory(c.env.DB, c.req.param("id"), category);
   return c.json({ ok: true, id });
 });

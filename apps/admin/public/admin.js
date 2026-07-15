@@ -98,6 +98,24 @@ function addTownForm() {
 }
 const v = (id) => document.getElementById(id).value.trim();
 const slugify = (s) => String(s || "").toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+// Downscale an image file to a small JPEG data URL (product photos → fits D1).
+const downscaleImg = (file) => new Promise((resolve, reject) => {
+  const rd = new FileReader();
+  rd.onerror = reject;
+  rd.onload = () => {
+    const img = new Image();
+    img.onerror = reject;
+    img.onload = () => {
+      const max = 800, scale = Math.min(1, max / Math.max(img.width, img.height));
+      const cv = document.createElement("canvas");
+      cv.width = Math.round(img.width * scale); cv.height = Math.round(img.height * scale);
+      cv.getContext("2d").drawImage(img, 0, 0, cv.width, cv.height);
+      resolve(cv.toDataURL("image/jpeg", 0.7));
+    };
+    img.src = rd.result;
+  };
+  rd.readAsDataURL(file);
+});
 // Cloudflare "Create Token" deep-link pre-filled with exactly the perms a town deploy needs.
 function cfTokenLink(accountId) {
   const perms = [
@@ -334,13 +352,15 @@ async function providerDetail(townId, p) {
 
     <div class="card">
       <h2 style="margin-top:0">Catalog</h2>
-      ${list(cat.catalog || [], (i) => { const off = i.available === 0; return `<div class="order-line"><div><strong>${esc(i.name)}</strong> <span class="muted small">${esc(i.category || "")}</span>${off ? ` <span class="badge REJECTED">out of stock</span>` : ""}<br><span class="muted small">${money(i.price)} · ${esc(i.unit || "piece")}</span></div><div class="row grow0" style="gap:6px"><button class="ghost small avail" data-iid="${esc(i.id)}" data-on="${off ? 0 : 1}">${off ? "In stock" : "Out"}</button><button class="ghost small deli" data-iid="${esc(i.id)}" data-name="${esc(i.name)}">✕</button></div></div>`; }, "No items yet — customers can't order without these.")}
+      ${list(cat.catalog || [], (i) => { const off = i.available === 0; return `<div class="order-line"><div style="display:flex;gap:8px;align-items:flex-start;flex:1">${i.image ? `<img src="${i.image}" style="width:44px;height:44px;object-fit:cover;border-radius:6px;flex:0 0 auto" />` : ""}<div><strong>${esc(i.name)}</strong> <span class="muted small">${esc(i.category || "")}</span>${off ? ` <span class="badge REJECTED">out of stock</span>` : ""}<br><span class="muted small">${money(i.price)} · ${esc(i.unit || "piece")}</span>${i.description ? `<br><span class="muted small">${esc(i.description)}</span>` : ""}</div></div><div class="row grow0" style="gap:6px"><label class="ghost small grow0" style="cursor:pointer;padding:6px 10px;border:1px solid var(--border-strong);border-radius:8px">📷<input type="file" class="iimg" data-iid="${esc(i.id)}" accept="image/*" hidden /></label><button class="ghost small avail" data-iid="${esc(i.id)}" data-on="${off ? 0 : 1}">${off ? "In stock" : "Out"}</button><button class="ghost small deli" data-iid="${esc(i.id)}" data-name="${esc(i.name)}">✕</button></div></div>`; }, "No items yet — customers can't order without these.")}
       <div class="row" style="gap:6px;margin-top:10px;align-items:flex-end">
-        <div style="flex:1"><label>Item</label><input id="i_name" placeholder="Shirt" /></div>
-        <div style="flex:1"><label>Category</label><input id="i_cat" placeholder="Wash & Iron" /></div>
-        <div><label>Price (₹)</label><input id="i_price" inputmode="numeric" placeholder="20" style="width:90px" /></div>
-        <button class="grow0" id="iaddbtn">Add</button>
-      </div><p id="imsg" class="err small"></p>
+        <div style="flex:1"><label>Item</label><input id="i_name" placeholder="Goat Milk soap" /></div>
+        <div style="flex:1"><label>Category</label><input id="i_cat" placeholder="Soaps" /></div>
+        <div><label>Price (₹)</label><input id="i_price" inputmode="numeric" placeholder="99" style="width:90px" /></div>
+      </div>
+      <label style="margin-top:6px">Description <span class="muted small">— optional, shown to the customer</span></label><input id="i_desc" placeholder="Nourishes & moisturizes skin…" />
+      <div class="row" style="gap:8px;margin-top:8px;align-items:center"><label class="ghost small grow0" style="cursor:pointer;padding:7px 12px;border:1px solid var(--border-strong);border-radius:8px">📷 Add photo<input type="file" id="i_img" accept="image/*" hidden /></label><span id="i_imgname" class="muted small"></span><button class="grow0" id="iaddbtn" style="margin-left:auto">Add item</button></div>
+      <p id="imsg" class="err small"></p>
     </div>`;
 
   document.getElementById("psave").onclick = async () => {
@@ -362,11 +382,23 @@ async function providerDetail(townId, p) {
     try { await api(A("/captains"), { method: "POST", body: { name: v("c_name"), phone: v("c_phone") } }); providerDetail(townId, p); }
     catch (e) { msg.textContent = e.data?.need || e.message; }
   };
+  // New-item photo picker (holds the downscaled data URL until Add is tapped).
+  let newImg = null;
+  const iimgEl = document.getElementById("i_img");
+  if (iimgEl) iimgEl.onchange = async () => {
+    const f = iimgEl.files?.[0]; if (!f) return;
+    try { newImg = await downscaleImg(f); document.getElementById("i_imgname").textContent = "✓ photo attached"; } catch { document.getElementById("i_imgname").textContent = "couldn't read image"; }
+  };
   document.getElementById("iaddbtn").onclick = async () => {
     const msg = document.getElementById("imsg"); msg.textContent = "";
-    try { await api(A("/catalog"), { method: "POST", body: { name: v("i_name"), category: v("i_cat"), price: (parseInt(v("i_price"), 10) || 0) * 100 } }); providerDetail(townId, p); }
+    try { await api(A("/catalog"), { method: "POST", body: { name: v("i_name"), category: v("i_cat"), price: (parseInt(v("i_price"), 10) || 0) * 100, description: v("i_desc"), image: newImg } }); providerDetail(townId, p); }
     catch (e) { msg.textContent = e.message; }
   };
+  // Per-item photo upload (set/replace an existing item's image).
+  el.querySelectorAll(".iimg").forEach((inp) => (inp.onclick = (e) => e.stopPropagation(), inp.onchange = async () => {
+    const f = inp.files?.[0]; if (!f) return;
+    try { const image = await downscaleImg(f); await api(A(`/catalog/${inp.dataset.iid}`), { method: "PATCH", body: { image } }); providerDetail(townId, p); } catch {}
+  }));
   el.querySelectorAll(".delm").forEach((b) => (b.onclick = async () => { if (confirm(`Remove manager "${b.dataset.name}"?`)) { await api(A(`/managers/${b.dataset.mid}`), { method: "DELETE" }); providerDetail(townId, p); } }));
   el.querySelectorAll(".delc").forEach((b) => (b.onclick = async () => { if (confirm(`Remove captain "${b.dataset.name}"?`)) { await api(A(`/captains/${b.dataset.cid}`), { method: "DELETE" }); providerDetail(townId, p); } }));
   el.querySelectorAll(".avail").forEach((b) => (b.onclick = async () => { await api(A(`/catalog/${b.dataset.iid}`), { method: "PATCH", body: { available: b.dataset.on === "0" } }); providerDetail(townId, p); }));
