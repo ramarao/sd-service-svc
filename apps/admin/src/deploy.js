@@ -139,6 +139,7 @@ export async function deployTown(env, db, target, spec, { dryRun = true } = {}) 
     "UPDATE verticals SET flow = slug WHERE flow IS NULL OR flow = ''",
     "ALTER TABLE catalog_items ADD COLUMN available INTEGER NOT NULL DEFAULT 1",
     "ALTER TABLE service_providers ADD COLUMN fulfilment TEXT NOT NULL DEFAULT 'delivery'",
+    "ALTER TABLE service_providers ADD COLUMN code TEXT",
     "ALTER TABLE orders ADD COLUMN ship_mode TEXT",
     "ALTER TABLE orders ADD COLUMN courier_name TEXT",
     "ALTER TABLE orders ADD COLUMN courier_tracking TEXT",

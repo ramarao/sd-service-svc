@@ -290,6 +290,7 @@ async function providerDetail(townId, p) {
     <div class="card">
       <label>Name</label><input id="p_name" value="${esc(p.name)}" />
       <label style="margin-top:8px">Slug <span class="muted small">— URL id (${esc(p.slug)}/app), lowercase-with-hyphens</span></label><input id="p_slug" value="${esc(p.slug || "")}" />
+      <label style="margin-top:8px">Order code <span class="muted small">— prefixes order ids (${esc(p.code || "auto")}-001-DDMMYY)</span></label><input id="p_code" value="${esc(p.code || "")}" placeholder="auto" style="text-transform:uppercase" />
       <label style="margin-top:8px">Vertical</label>
       <select id="p_vertical">${(verts.verticals || []).map((x) => `<option value="${esc(x.slug)}" ${x.slug === p.vertical ? "selected" : ""}>${esc(x.name)}</option>`).join("") || `<option value="${esc(p.vertical || "")}">${esc(p.vertical || "—")}</option>`}</select>
       <label style="margin-top:8px">UPI ID</label><input id="p_upi" value="${esc(p.upi_id || "")}" placeholder="shop@upi" />
@@ -340,7 +341,7 @@ async function providerDetail(townId, p) {
 
   document.getElementById("psave").onclick = async () => {
     const msg = document.getElementById("pmsg");
-    try { await api(A(""), { method: "PATCH", body: { name: v("p_name"), slug: slugify(v("p_slug")), vertical: v("p_vertical"), upi_id: v("p_upi"), fulfilment: document.getElementById("p_fulfilment")?.value, photo_order: document.getElementById("p_photo").checked } }); msg.className = "small"; msg.textContent = "Saved ✓"; }
+    try { await api(A(""), { method: "PATCH", body: { name: v("p_name"), slug: slugify(v("p_slug")), code: v("p_code"), vertical: v("p_vertical"), upi_id: v("p_upi"), fulfilment: document.getElementById("p_fulfilment")?.value, photo_order: document.getElementById("p_photo").checked } }); msg.className = "small"; msg.textContent = "Saved ✓"; }
     catch (e) { msg.className = "err"; msg.textContent = e.message; }
   };
   document.getElementById("pdel").onclick = async () => {

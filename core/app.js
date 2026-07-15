@@ -60,6 +60,7 @@ import {
   captainName,
   listCaptainJobs,
   orderAssignees,
+  ensureProviderCode,
   replaceOrderItems,
   listManagers,
   createManager,
@@ -1311,7 +1312,7 @@ app.delete("/api/control/verticals/:slug", requireControlToken, async (c) => {
 
 // Providers.
 app.get("/api/control/providers", requireControlToken, async (c) => {
-  const { results } = await c.env.DB.prepare("SELECT id, slug, name, vertical, photo_order, fulfilment, upi_id, upi_name FROM service_providers ORDER BY vertical, name").all();
+  const { results } = await c.env.DB.prepare("SELECT id, slug, name, vertical, photo_order, fulfilment, code, upi_id, upi_name FROM service_providers ORDER BY vertical, name").all();
   return c.json({ providers: results || [] });
 });
 const FULFILMENTS = ["delivery", "courier", "both"];
@@ -1329,7 +1330,8 @@ app.post("/api/control/providers", requireControlToken, async (c) => {
   } catch (e) {
     return c.json({ error: "slug_taken_or_invalid", detail: String(e) }, 400);
   }
-  return c.json({ ok: true, id });
+  const code = await ensureProviderCode(c.env.DB, { id, slug, name, code: null }); // MED, GRO…
+  return c.json({ ok: true, id, code });
 });
 app.patch("/api/control/providers/:id", requireControlToken, async (c) => {
   const cur = await getProvider(c.env.DB, c.req.param("id"));
@@ -1340,14 +1342,26 @@ app.patch("/api/control/providers/:id", requireControlToken, async (c) => {
     ? String(b.slug).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || cur.slug
     : cur.slug;
   const ful = b.fulfilment !== undefined ? (FULFILMENTS.includes(b.fulfilment) ? b.fulfilment : cur.fulfilment || "delivery") : (cur.fulfilment || "delivery");
+  // Order-id code — uppercase alphanumerics; keep current if blank. Uniqueness is
+  // enforced by the caller having a distinct value (checked below).
+  let code = cur.code;
+  if (b.code !== undefined) {
+    const cand = String(b.code).toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6);
+    if (cand && cand !== cur.code) {
+      const clash = await c.env.DB.prepare("SELECT id FROM service_providers WHERE code = ? AND id != ?").bind(cand, cur.id).first();
+      if (clash) return c.json({ error: "code_taken", detail: `Code ${cand} is already used by another shop.` }, 400);
+      code = cand;
+    } else if (cand) code = cand;
+  }
   try {
-    await c.env.DB.prepare("UPDATE service_providers SET name=?, slug=?, vertical=?, photo_order=?, fulfilment=?, upi_id=?, upi_name=? WHERE id=?")
+    await c.env.DB.prepare("UPDATE service_providers SET name=?, slug=?, vertical=?, photo_order=?, fulfilment=?, code=?, upi_id=?, upi_name=? WHERE id=?")
       .bind(
         b.name?.trim() || cur.name,
         slug,
         b.vertical || cur.vertical,
         b.photo_order !== undefined ? (b.photo_order ? 1 : 0) : (cur.photo_order || 0),
         ful,
+        code || null,
         b.upi_id !== undefined ? b.upi_id || null : cur.upi_id,
         b.upi_name !== undefined ? b.upi_name || null : cur.upi_name,
         cur.id

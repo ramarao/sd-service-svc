@@ -20,18 +20,34 @@ export function dayKey(ts) {
   return `${dd}${mm}${yy}`;
 }
 
-async function nextOrderId(db, ts) {
+// A provider's short order-id code (e.g. MED). Derived from the slug on first
+// use and persisted; kept unique within the town so order ids are unambiguous.
+export async function ensureProviderCode(db, provider) {
+  if (!provider) return "ORD";
+  if (provider.code) return provider.code;
+  const base = String(provider.slug || provider.name || "ORD").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 3) || "ORD";
+  let code = base, n = 1;
+  while (await db.prepare("SELECT id FROM service_providers WHERE code = ? AND id != ?").bind(code, provider.id).first()) {
+    code = base + ++n;
+  }
+  await db.prepare("UPDATE service_providers SET code = ? WHERE id = ?").bind(code, provider.id).run();
+  return code;
+}
+
+// Human order id: CODE-001-DDMMYY, CODE-002-DDMMYY … sequential per provider per
+// IST calendar day, so ids are unique + tell you which provider they belong to.
+async function nextOrderId(db, ts, code) {
   const day = dayKey(ts);
-  // Atomic per-day counter via upsert + RETURNING.
+  const key = `${code || "ORD"}:${day}`; // per-provider-per-day counter key
   const row = await db
     .prepare(
       "INSERT INTO order_counters (day, seq) VALUES (?, 1) " +
         "ON CONFLICT(day) DO UPDATE SET seq = seq + 1 RETURNING seq"
     )
-    .bind(day)
+    .bind(key)
     .first();
   const seq = row?.seq || 1;
-  return `${String(seq).padStart(3, "0")}-${day}`;
+  return `${code ? code + "-" : ""}${String(seq).padStart(3, "0")}-${day}`;
 }
 
 // ── Platform settings & WhatsApp config resolution ───────────────────────────
@@ -329,7 +345,8 @@ export async function listCaptainJobs(db, flow, phone, providerId) {
 // ── Orders ───────────────────────────────────────────────────────────────────
 export async function createOrder(db, { providerId, customerId, address, lat, lng, addressId, customerName, customerPhone, contactName, contactPhone, items, note, images }) {
   const ts = now();
-  const id = await nextOrderId(db, ts);
+  const code = await ensureProviderCode(db, await getProvider(db, providerId));
+  const id = await nextOrderId(db, ts, code);
   const latN = Number.isFinite(+lat) ? +lat : null;
   const lngN = Number.isFinite(+lng) ? +lng : null;
   await db

@@ -92,7 +92,7 @@ async function groqExtract(env, subject, body) {
   const sys =
     "You extract UPI/Paytm payment details from a merchant payment notification email. " +
     "Return ONLY a JSON object with these keys:\n" +
-    "- order_id: our internal reference, ONLY if a token EXACTLY matching the pattern of 3 digits, a hyphen, then 6 digits (e.g. 001-100726) appears anywhere (usually in a note/remark/comment). This is NOT the gateway's own 'Order ID'. If no such NNN-DDMMYY token exists, return null.\n" +
+    "- order_id: our internal reference — a token like NNN-DDMMYY (3 digits, hyphen, 6 digits, e.g. 001-100726) OPTIONALLY prefixed with a short uppercase shop code and hyphen (e.g. MED-001-100726). It appears anywhere, usually in a note/remark/comment. This is NOT the gateway's own 'Order ID'. Return the full token (with the code prefix if present); if no such token exists, return null.\n" +
     "- amount: the number of rupees received (no currency symbol).\n" +
     "- status: 'paid' if the payment was received/successful, 'failed' if it failed, else 'unknown'.\n" +
     "- txn_ref: the payment gateway's own reference/order/transaction id (e.g. a Paytm 'Order ID' like 753248), or null.\n" +
