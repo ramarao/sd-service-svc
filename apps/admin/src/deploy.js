@@ -91,11 +91,18 @@ export async function deployTown(env, db, target, spec, { dryRun = true } = {}) 
   const acct = target.cf_account_id;
   const workerName = `sd-${spec.slug}-svc`;
   const dbName = `sd-${spec.slug}-db`;
-  const controlToken = spec.secrets?.CONTROL_TOKEN || randomId() + randomId();
+  // Does the worker already exist? A redeploy must PRESERVE the town's auth
+  // secrets — CF retains secrets across script uploads, so rotating
+  // SESSION_SECRET/CONTROL_TOKEN here would log out every live customer and
+  // desync the control plane. Mint fresh ones only on the first deploy.
+  let workerExists = false;
+  try { await cf(target, `/accounts/${acct}/workers/scripts/${workerName}/settings`); workerExists = true; } catch { /* new worker */ }
+  const existingTown = await db.prepare("SELECT control_token FROM towns WHERE slug = ?").bind(spec.slug).first().catch(() => null);
+  const controlToken = spec.secrets?.CONTROL_TOKEN || existingTown?.control_token || randomId() + randomId();
   const sessionSecret = spec.secrets?.SESSION_SECRET || randomId() + randomId();
   const secrets = {
-    SESSION_SECRET: sessionSecret,
-    CONTROL_TOKEN: controlToken,
+    // On a redeploy, omit the auth secrets so CF keeps the values already set.
+    ...(workerExists ? {} : { SESSION_SECRET: sessionSecret, CONTROL_TOKEN: controlToken }),
     PUBLIC_HOST: spec.domain,
     ...(spec.secrets || {}),
   };
@@ -145,6 +152,16 @@ export async function deployTown(env, db, target, spec, { dryRun = true } = {}) 
     "ALTER TABLE orders ADD COLUMN ship_mode TEXT",
     "ALTER TABLE orders ADD COLUMN courier_name TEXT",
     "ALTER TABLE orders ADD COLUMN courier_tracking TEXT",
+    "ALTER TABLE service_providers ADD COLUMN payment_method TEXT NOT NULL DEFAULT 'cod'",
+    "ALTER TABLE orders ADD COLUMN payment_method TEXT",
+    "ALTER TABLE orders ADD COLUMN payment_receipt TEXT",
+    "ALTER TABLE orders ADD COLUMN payment_receipt_at INTEGER",
+    "ALTER TABLE orders ADD COLUMN payment_extracted TEXT",
+    "ALTER TABLE orders ADD COLUMN payment_requested_at INTEGER",
+    "ALTER TABLE orders ADD COLUMN delivery_fee INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE orders ADD COLUMN courier_receipt TEXT",
+    // Courier providers are prepaid by definition — align any that predate this column.
+    "UPDATE service_providers SET payment_method = 'upi' WHERE vertical IN (SELECT slug FROM verticals WHERE flow = 'courier')",
   ]) {
     try { await cf(target, `/accounts/${acct}/d1/database/${dbId}/query`, { method: "POST", json: { sql: alter } }); } catch { /* already present */ }
   }
@@ -153,9 +170,7 @@ export async function deployTown(env, db, target, spec, { dryRun = true } = {}) 
 
   // Only apply the DO migration on the FIRST upload — a re-upload of an existing
   // worker (already at tag v1) must NOT re-send "create v1" or CF 412s.
-  let workerExists = false;
-  try { await cf(target, `/accounts/${acct}/workers/scripts/${workerName}/settings`); workerExists = true; } catch { /* new worker */ }
-
+  // (workerExists was resolved up-front, before the secrets were assembled.)
   const bundle = await (await readAsset(env, "worker.js")).text();
   const metadata = {
     main_module: "worker.js",

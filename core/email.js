@@ -76,7 +76,7 @@ async function matchByAmount(db, paise) {
     .prepare(
       "SELECT o.id FROM orders o WHERE o.payment_status IS NULL AND o.created_at > ? " +
         "AND o.status IN ('OUT_FOR_DELIVERY','DELIVERED') " +
-        "AND (SELECT COALESCE(SUM(qty*unit_price),0) FROM order_items WHERE order_id = o.id) = ? " +
+        "AND ((SELECT COALESCE(SUM(qty*unit_price),0) FROM order_items WHERE order_id = o.id) + COALESCE(o.delivery_fee,0)) = ? " +
         "ORDER BY o.created_at DESC LIMIT 2"
     )
     .bind(since, paise)

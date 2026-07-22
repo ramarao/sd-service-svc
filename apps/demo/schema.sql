@@ -44,6 +44,8 @@ CREATE TABLE IF NOT EXISTS service_providers (
   photo_order        INTEGER NOT NULL DEFAULT 0,  -- 1 = customer can upload a photo/list; Groq extracts items
   code               TEXT,                        -- short unique code (e.g. MED) → prefixes order ids: MED-001-DDMMYY
   fulfilment         TEXT NOT NULL DEFAULT 'delivery', -- 'delivery' | 'courier' | 'both' (how orders leave the shop)
+  payment_method     TEXT NOT NULL DEFAULT 'cod',      -- 'upi' | 'cod' | 'both' (customer picks when 'both').
+                                                       -- Courier orders are always prepaid UPI regardless.
   upi_id             TEXT,                        -- VPA for collecting payment (e.g. name@okhdfcbank)
   upi_name           TEXT,                        -- payee name shown in the UPI app
   created_at         INTEGER NOT NULL
@@ -188,12 +190,21 @@ CREATE TABLE IF NOT EXISTS orders (
   delivery_captain_phone TEXT,           -- DELIVERY captain phone (snapshot)
   ship_mode      TEXT,                   -- 'delivery' | 'courier' (chosen at dispatch)
   courier_name   TEXT,                   -- courier company when ship_mode = 'courier' (DTDC, Delhivery…)
-  courier_tracking TEXT,                 -- courier tracking / consignment number
-  payment_status TEXT,                   -- 'paid' | 'failed' | null (from settlement email)
-  payment_ref    TEXT,                   -- gateway txn / order id
+  courier_tracking TEXT,                 -- courier tracking link/number (optional)
+  courier_receipt TEXT,                  -- data URL of the courier receipt photo (optional)
+  payment_status TEXT,                   -- null | 'submitted' (receipt uploaded, awaiting admin)
+                                         -- | 'paid' | 'rejected' | 'failed'
+  payment_method TEXT,                   -- 'upi' | 'cod' — resolved for THIS order at creation
+  payment_ref    TEXT,                   -- gateway txn / UPI ref (UTR) / 'CASH'
   payment_amount INTEGER,                -- amount received, in paise
   payment_payer  TEXT,                   -- payer VPA / name
   payment_at     INTEGER,                -- epoch ms when recorded
+  payment_receipt TEXT,                  -- data URL of the customer-uploaded payment receipt
+  payment_receipt_at INTEGER,            -- epoch ms the receipt was uploaded
+  payment_extracted TEXT,                -- JSON: what Groq read off the receipt (admin still confirms)
+  payment_requested_at INTEGER,          -- epoch ms the pay QR was sent; a receipt's payment
+                                         -- date must be AFTER this to auto-confirm (anti-reuse)
+  delivery_fee   INTEGER NOT NULL DEFAULT 0, -- shop-set courier/delivery charge (paise); added to total
   note         TEXT,
   created_at   INTEGER NOT NULL,
   updated_at   INTEGER NOT NULL

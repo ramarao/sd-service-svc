@@ -22,8 +22,12 @@ const h = (html) => {
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const fmtDate = (ms) => new Date(ms).toLocaleString();
 const badge = (s) => `<span class="badge ${esc(s)}">${esc(s.replace(/_/g, " "))}</span>`;
+// Payment at a glance in the orders list. 'submitted' is the one that needs the
+// shop to DO something, so it gets a pill of its own rather than reading as failed.
 const paidPill = (o) =>
   o.payment_status === "paid" ? `<span class="paid-pill">✅ Paid</span>`
+  : o.payment_status === "submitted" ? `<span class="paid-pill review">🕗 Check payment</span>`
+  : o.payment_status === "rejected" ? `<span class="paid-pill fail">❌ Receipt rejected</span>`
   : o.payment_status === "failed" ? `<span class="paid-pill fail">❌ Failed</span>` : "";
 
 // Money: values are stored in paise (minor units).
@@ -95,6 +99,14 @@ async function route() {
     if (path === "/start") return renderStart();
     const m = path.match(/^\/([^/]+)\/app$/);
     if (m) { let s; try { s = decodeURIComponent(m[1]); } catch { s = m[1]; } return renderCustomer(s); }
+    // A shop's public storefront: /{slug} (no /app). Needs no session.
+    const sm = path.match(/^\/([^/]+)\/?$/);
+    if (sm) {
+      let s; try { s = decodeURIComponent(sm[1]); } catch { s = sm[1]; }
+      return renderShopLanding(s);
+    }
+    // Root of a single-shop town → that shop's storefront, not a dev index.
+    if (path === "/" && CFG.soleProvider) return renderShopLanding(CFG.soleProvider);
     return renderLanding();
   } catch (e) {
     h(`<div class="card"><p class="err">${esc(e.message)}</p></div>`);
@@ -113,6 +125,135 @@ function renderLanding() {
     </div>`);
 }
 
+// Readable ink for text sitting ON a swatch. Real relative-luminance (sRGB,
+// gamma-corrected) rather than a naive average, so cream/ivory swatches get dark
+// digits instead of invisible white ones. CSS color-contrast() would do this
+// natively but isn't reliably supported yet.
+function inkOn(hex) {
+  const h = String(hex).replace("#", "");
+  const full = h.length === 3 ? h.split("").map((c) => c + c).join("") : h;
+  if (!/^[0-9a-f]{6}$/i.test(full)) return "#ffffff";
+  const lin = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+  const L =
+    0.2126 * lin(parseInt(full.slice(0, 2), 16)) +
+    0.7152 * lin(parseInt(full.slice(2, 4), 16)) +
+    0.0722 * lin(parseInt(full.slice(4, 6), 16));
+  return L > 0.5 ? "#0a1c34" : "#ffffff";
+}
+
+// "VDR Cosmetics" → "VDR". The stamp on a soap disc when it has no photo.
+function initialsOf(name) {
+  const first = String(name || "").trim().split(/\s+/)[0] || "";
+  return (first.length <= 4 ? first : first.slice(0, 3)).toUpperCase();
+}
+
+// ── Public shop landing ─────────────────────────────────────────────────────
+// The shop's storefront: what a visitor with no session sees. Entirely driven by
+// the provider's `config.landing` + its live catalog, so every shop gets its own
+// page without a line of its branding living in here. No landing configured →
+// callers fall back to the plain sign-in card.
+async function renderShopLanding(slug) {
+  const provider = await api(`/api/providers/${encodeURIComponent(slug)}`).catch(() => null);
+  if (!provider) return h(`<div class="card"><p class="err">Unknown shop "${esc(slug)}".</p></div>`);
+  const L = provider.landing;
+  if (!L) return customerLogin(slug, provider); // nothing to show off — plain login
+
+  const cur = provider.currency || "INR";
+  // The collection's order + swatch colours are curated in config; price,
+  // description and stock stay live from the catalog. Anything in the catalog but
+  // not curated still shows, so a new soap never silently goes missing.
+  const bySlug = new Map((provider.catalog || []).map((c) => [c.name.toLowerCase(), c]));
+  const curated = (L.collection || []).map((c) => ({ ...c, item: bySlug.get(String(c.name).toLowerCase()) })).filter((c) => c.item);
+  const curatedNames = new Set(curated.map((c) => c.item.name.toLowerCase()));
+  const extras = (provider.catalog || []).filter((c) => !curatedNames.has(c.name.toLowerCase())).map((item) => ({ name: item.name, color: "#9aa7b4", item }));
+  const collection = [...curated, ...extras];
+
+  const waCta = provider.wa
+    ? `<a class="lp-btn lp-btn-primary" href="${esc(provider.wa)}" target="_blank" rel="noopener">Order on WhatsApp</a>`
+    : `<a class="lp-btn lp-btn-primary" href="/${encodeURIComponent(slug)}/app">Order now</a>`;
+
+  // A storefront is the thing people bookmark and paste into WhatsApp, so it needs
+  // its own title/description — the town's static <title> would show "Manasanta".
+  document.title = L.tagline ? `${provider.name} — ${L.tagline}` : provider.name;
+  let meta = document.querySelector('meta[name="description"]');
+  if (!meta) { meta = document.createElement("meta"); meta.name = "description"; document.head.appendChild(meta); }
+  meta.content = L.blurb || "";
+
+  const mark = L.discMark || initialsOf(provider.name);
+  const soapCards = collection.map((c, i) => {
+    const it = c.item;
+    const off = it.available === 0;
+    const swatch = c.color || "#9aa7b4";
+    return `<article class="lp-soap${off ? " lp-soap-off" : ""}" style="--swatch:${esc(swatch)};--swatch-ink:${inkOn(swatch)};animation-delay:${60 + i * 45}ms">
+      <span class="lp-soap-n">${i + 1}</span>
+      <div class="lp-disc">${it.image ? `<img src="${it.image}" alt="${esc(it.name)}" />` : `<span class="lp-disc-mark">${esc(mark)}</span>`}</div>
+      <h3>${esc(it.name)}</h3>
+      ${it.description ? `<p>${esc(it.description)}</p>` : ""}
+      <div class="lp-soap-foot"><span class="lp-price">${money(it.price || 0, cur)}</span>${off ? `<span class="lp-oos">Out of stock</span>` : ""}</div>
+    </article>`;
+  }).join("");
+
+  const features = (L.features || []).map((f) => `<li><span>${esc(f.icon || "✦")}</span>${esc(f.label || f)}</li>`).join("");
+  const badges = (L.badges || []).map((b) => `<li><span>${esc(b.icon || "✦")}</span>${esc(b.label || b)}</li>`).join("");
+  const C = L.contact || {};
+
+  h(`
+  <div class="lp">
+    <header class="lp-nav">
+      <a class="lp-mark" href="#top"><b>${esc(L.wordmark || provider.name)}</b><span>${esc(L.wordmarkSub || "")}</span></a>
+      <nav>
+        <a href="#collection">Collection</a>
+        <a href="#about">About</a>
+        <a href="#contact">Contact</a>
+        <a class="lp-nav-cta" href="/${encodeURIComponent(slug)}/app">Order</a>
+      </nav>
+    </header>
+
+    <section class="lp-hero" id="top">
+      <div class="lp-hero-glow"></div>
+      <div class="lp-hero-in">
+        <p class="lp-eyebrow">${esc(L.tagline || "")}</p>
+        <h1>${esc(L.headline || provider.name)}<em>${esc(L.headlineScript || "")}</em></h1>
+        <p class="lp-blurb">${esc(L.blurb || "")}</p>
+        <div class="lp-cta">${waCta}<a class="lp-btn lp-btn-ghost" href="#collection">View the collection</a></div>
+      </div>
+      ${features ? `<ul class="lp-features">${features}</ul>` : ""}
+    </section>
+
+    <section class="lp-sec" id="collection">
+      <div class="lp-sec-head"><span class="lp-rule"></span><h2>Our Soap Collection</h2><span class="lp-rule"></span></div>
+      <div class="lp-grid">${soapCards}</div>
+    </section>
+
+    ${badges ? `<section class="lp-trust"><ul>${badges}</ul></section>` : ""}
+
+    ${L.about ? `<section class="lp-sec lp-about" id="about">
+      <div class="lp-sec-head"><span class="lp-rule"></span><h2>${esc(L.aboutTitle || "About us")}</h2><span class="lp-rule"></span></div>
+      <div class="lp-prose">${L.about.split("\n\n").map((p) => `<p>${esc(p)}</p>`).join("")}</div>
+    </section>` : ""}
+
+    <section class="lp-sec lp-contact" id="contact">
+      <div class="lp-sec-head"><span class="lp-rule"></span><h2>Contact</h2><span class="lp-rule"></span></div>
+      <div class="lp-contact-grid">
+        ${C.phone ? `<a href="tel:${esc(C.phone)}"><span>Phone</span><b>${esc(C.phone)}</b></a>` : ""}
+        ${C.email ? `<a href="mailto:${esc(C.email)}"><span>Email</span><b>${esc(C.email)}</b></a>` : ""}
+        ${C.address ? `<div><span>Visit</span><b>${esc(C.address)}</b></div>` : ""}
+        ${C.hours ? `<div><span>Hours</span><b>${esc(C.hours)}</b></div>` : ""}
+      </div>
+      <div class="lp-cta" style="justify-content:center;margin-top:26px">${waCta}</div>
+    </section>
+
+    <footer class="lp-foot">
+      <div class="lp-mark"><b>${esc(L.wordmark || provider.name)}</b><span>${esc(L.wordmarkSub || "")}</span></div>
+      <nav>
+        <a href="#collection">Collection</a><a href="#about">About</a><a href="#contact">Contact</a>
+        <a href="/${encodeURIComponent(slug)}/app">Order</a>
+      </nav>
+      <p>${esc(L.footNote || `© ${new Date().getFullYear()} ${provider.name}`)}</p>
+    </footer>
+  </div>`);
+}
+
 // ── Marketplace chooser: pick a vertical → pick a provider → order ───────────
 async function renderStart() {
   const who = await me();
@@ -129,6 +270,10 @@ async function renderStart() {
   try { verticals = (await api("/api/verticals")).verticals || []; } catch {}
   const box = document.getElementById("verts");
   if (!verticals.length) { box.innerHTML = `<p class="muted">No services available yet.</p>`; return; }
+  // A town with a single vertical shouldn't make anyone "choose" from a list of
+  // one — go straight to its providers. `skipped` tells that step there's no
+  // chooser worth offering a Back button to.
+  if (verticals.length === 1) return chooseProviders(verticals[0].slug, verticals[0].name, true);
   box.innerHTML = verticals.map((v) =>
     `<button class="ghost prov" data-slug="${esc(v.slug)}" data-name="${esc(v.name)}">
        <span style="font-size:20px;margin-right:8px">${esc(v.emoji || "•")}</span><span style="flex:1;text-align:left">${esc(v.name)}</span><span class="chev">›</span>
@@ -136,17 +281,69 @@ async function renderStart() {
   box.querySelectorAll(".prov").forEach((b) => (b.onclick = () => chooseProviders(b.dataset.slug, b.dataset.name)));
 }
 
-async function chooseProviders(vslug, vname) {
-  h(`<div class="topbar"><h1>${esc(vname)}</h1><button class="ghost small" id="back">←</button></div>
-     <p class="muted">Choose a provider</p><div id="provs" class="stack"><p class="muted">Loading…</p></div>`);
-  document.getElementById("back").onclick = renderStart;
+// skipped = we got here automatically (single vertical), so there's no vertical
+// chooser behind us to go Back to.
+async function chooseProviders(vslug, vname, skipped) {
+  h(`<div class="topbar"><h1>${esc(vname)}</h1>${skipped ? "" : `<button class="ghost small" id="back">←</button>`}</div>
+     <p class="muted">Loading…</p><div id="provs" class="stack"></div>`);
+  document.getElementById("back")?.addEventListener("click", renderStart);
   let providers = [];
   try { providers = (await api(`/api/verticals/${encodeURIComponent(vslug)}/providers`)).providers || []; } catch {}
+  // Single shop → skip this step too. location.replace, NOT href: an auto-skip
+  // must not leave a history entry, or Back would land on /start and bounce the
+  // customer straight forward again.
+  if (providers.length === 1) return location.replace(`/${encodeURIComponent(providers[0].slug)}/app`);
   const box = document.getElementById("provs");
   if (!providers.length) { box.innerHTML = `<p class="muted">No providers here yet.</p>`; return; }
-  box.innerHTML = providers.map((p) =>
-    `<button class="ghost prov" data-slug="${esc(p.slug)}"><span style="flex:1;text-align:left">${esc(p.name)}</span><span class="chev">›</span></button>`).join("");
-  box.querySelectorAll(".prov").forEach((b) => (b.onclick = () => { location.href = `/${encodeURIComponent(b.dataset.slug)}/app`; }));
+  h(`<div class="topbar"><h1>${esc(vname)}</h1>${skipped ? "" : `<button class="ghost small" id="back">←</button>`}</div>
+     <p class="muted">Choose a provider</p><div id="provs" class="stack">${providers.map((p) =>
+       `<button class="ghost prov" data-slug="${esc(p.slug)}"><span style="flex:1;text-align:left">${esc(p.name)}</span><span class="chev">›</span></button>`).join("")}</div>`);
+  document.getElementById("back")?.addEventListener("click", renderStart);
+  // A real choice → push, so Back returns to this list.
+  el.querySelectorAll(".prov").forEach((b) => (b.onclick = () => { location.href = `/${encodeURIComponent(b.dataset.slug)}/app`; }));
+}
+
+// How this order gets paid. Only a shop set to 'both' asks the customer; 'upi'
+// and 'cod' shops are told, not asked (and a courier shop is always UPI). A UPI
+// shop with no VPA configured can't take payment — flag it rather than promise it.
+function payPickerHtml(provider) {
+  const pm = provider.payment_method || "cod";
+  if (pm === "both") {
+    return `<label style="margin-top:12px">Payment</label>
+      <div class="row" style="gap:6px">
+        <button type="button" class="ghost small grow0 pm sel" data-pm="cod">💵 Cash on delivery</button>
+        <button type="button" class="ghost small grow0 pm" data-pm="upi"${provider.has_upi ? "" : " disabled"}>💳 Pay online (UPI)</button>
+      </div>
+      ${provider.has_upi ? `<p class="muted small" style="margin:4px 0 0">Pay online and we'll start your order as soon as the shop confirms.</p>` : ""}`;
+  }
+  if (pm === "upi") {
+    return provider.has_upi
+      ? `<p class="muted small" style="margin:12px 0 0">💳 <b>Pay online</b> — you'll get a UPI QR once the shop accepts and prices your order.</p>`
+      : `<p class="small err" style="margin:12px 0 0">⚠️ This shop takes online payment but hasn't set up a UPI ID yet.</p>`;
+  }
+  return `<p class="muted small" style="margin:12px 0 0">💵 <b>Cash on delivery</b> — pay when your order arrives.</p>`;
+}
+
+// Downscale before upload — smaller for Groq + fits D1 storage. Longest side ≤ 1280.
+// Shared by the photo-order form and the payment-receipt upload.
+function downscaleImg(file) {
+  return new Promise((resolve, reject) => {
+    const rd = new FileReader();
+    rd.onerror = reject;
+    rd.onload = () => {
+      const img = new Image();
+      img.onerror = reject;
+      img.onload = () => {
+        const max = 1280, scale = Math.min(1, max / Math.max(img.width, img.height));
+        const w = Math.round(img.width * scale), h = Math.round(img.height * scale);
+        const cv = document.createElement("canvas"); cv.width = w; cv.height = h;
+        cv.getContext("2d").drawImage(img, 0, 0, w, h);
+        resolve(cv.toDataURL("image/jpeg", 0.6));
+      };
+      img.src = rd.result;
+    };
+    rd.readAsDataURL(file);
+  });
 }
 
 // ── Customer ─────────────────────────────────────────────────────────────────
@@ -155,7 +352,18 @@ async function renderCustomer(slug) {
   if (!provider) return h(`<div class="card"><p class="err">Unknown provider "${esc(slug)}".</p></div>`);
 
   const who = await me();
-  if (!who.authenticated || who.role !== "customer") return customerLogin(slug, provider);
+  // No session → show the storefront rather than a bare OTP form; it carries the
+  // WhatsApp CTA that actually gets them signed in. (Falls back to the login card
+  // for shops with no landing configured.)
+  if (!who.authenticated || who.role !== "customer") return renderShopLanding(slug);
+
+  // An order status message deep-links here as /{slug}/app?order=… — open that
+  // order. Strip the param first so a reload doesn't re-open it.
+  const deepOrder = new URLSearchParams(location.search).get("order");
+  if (deepOrder) {
+    history.replaceState(null, "", `/${encodeURIComponent(slug)}/app`);
+    return customerTrack(deepOrder, slug);
+  }
 
   const { orders } = await api(`/api/my/orders?provider=${encodeURIComponent(slug)}`);
   const list = orders
@@ -179,7 +387,7 @@ async function renderCustomer(slug) {
 
   document.getElementById("logout").onclick = logout;
   document.getElementById("new").onclick = () => customerNewOrder(slug, provider);
-  el.querySelectorAll(".order-line").forEach((n) => (n.onclick = () => customerTrack(n.dataset.id)));
+  el.querySelectorAll(".order-line").forEach((n) => (n.onclick = () => customerTrack(n.dataset.id, slug)));
 }
 
 function customerLogin(slug, provider) {
@@ -287,10 +495,14 @@ async function customerNewOrder(slug, provider) {
       </div>
       <label>Note (optional)</label>
       <input id="note" />
+      ${payPickerHtml(provider)}
       <button id="submit" style="margin-top:14px">Place request</button>
       <p id="msg"></p>
     </div>`);
   document.getElementById("back").onclick = () => renderCustomer(slug);
+  el.querySelectorAll(".pm").forEach((b) => (b.onclick = () => {
+    el.querySelectorAll(".pm").forEach((x) => x.classList.toggle("sel", x === b));
+  }));
 
   // ── Items picker (multi-select with quantity) ──
   const picker = document.getElementById("picker");
@@ -372,24 +584,7 @@ async function customerNewOrder(slug, provider) {
     const pitems = document.getElementById("photoitems");
     const priceOf = new Map((provider.catalog || []).map((ci) => [String(ci.name).toLowerCase(), ci.price || 0]));
 
-    // Downscale before upload — smaller for Groq + fits D1 storage. Longest side ≤ 1280.
-    const downscale = (file) => new Promise((resolve, reject) => {
-      const rd = new FileReader();
-      rd.onerror = reject;
-      rd.onload = () => {
-        const img = new Image();
-        img.onerror = reject;
-        img.onload = () => {
-          const max = 1280, scale = Math.min(1, max / Math.max(img.width, img.height));
-          const w = Math.round(img.width * scale), h = Math.round(img.height * scale);
-          const cv = document.createElement("canvas"); cv.width = w; cv.height = h;
-          cv.getContext("2d").drawImage(img, 0, 0, w, h);
-          resolve(cv.toDataURL("image/jpeg", 0.6));
-        };
-        img.src = rd.result;
-      };
-      rd.readAsDataURL(file);
-    });
+    const downscale = downscaleImg;
 
     let photoSeq = 0;
     // Merge an extracted item into the shared list, keyed by name + written amount
@@ -694,15 +889,148 @@ async function customerNewOrder(slug, provider) {
     try {
       await api("/api/my/orders", {
         method: "POST",
-        body: { slug, address_id: selectedAddrId, items, note: document.getElementById("note").value, images },
+        body: {
+          slug,
+          address_id: selectedAddrId,
+          items,
+          note: document.getElementById("note").value,
+          images,
+          payment_method: el.querySelector(".pm.sel")?.dataset.pm, // only when the shop offers both
+        },
       });
       renderCustomer(slug);
     } catch (e) { msg.className = "err"; msg.textContent = e.message; }
   };
 }
 
-async function customerTrack(id) {
-  const { order, pay } = await api(`/api/my/orders/${id}`);
+// The payment card on a customer's order. Only rendered for a UPI order the shop
+// has accepted and not yet confirmed as paid (`pay` is null otherwise), plus a
+// confirmation once it IS paid.
+function payCardHtml(order, pay) {
+  if (order.payment_status === "paid") {
+    return `<div class="card"><h2>Payment</h2>
+      <p class="small" style="margin:0"><b style="color:#0a7">✅ Payment confirmed</b> — thank you.</p>
+      ${order.payment_receipt ? `<a href="${order.payment_receipt}" target="_blank" rel="noopener" style="display:inline-block;margin-top:10px"><img class="rcpt" src="${order.payment_receipt}" alt="your payment receipt" /></a>` : ""}</div>`;
+  }
+  if (!pay) return "";
+  if (pay.misconfigured) {
+    return `<div class="card"><h2>Payment</h2>
+      <p class="small" style="margin:0">This shop hasn't set up online payment yet. Please contact them to pay.</p></div>`;
+  }
+  // Receipt sent, shop hasn't decided → nothing more for the customer to do.
+  if (pay.status === "submitted") {
+    return `<div class="card"><h2>Payment</h2>
+      <p class="small" style="margin:0">🕗 <b>Payment under review</b> — we've sent your receipt to the shop. You'll get a WhatsApp message once it's confirmed.</p>
+      <details style="margin-top:8px"><summary class="muted small">Sent the wrong receipt? Upload another</summary>
+        ${payUploadHtml()}</details></div>`;
+  }
+  const rejected = pay.status === "rejected";
+  // No "Pay now" intent link: upi:// deep links only work for gateway-issued
+  // dynamic QRs. These are static merchant QRs, where the intent silently fails
+  // or drops the amount — so the QR is the only honest path. Revisit if/when a
+  // payment gateway is wired in.
+  // Display the QR as a raster <img> (the token PNG endpoint), NOT the inline SVG:
+  // an <img> can be long-pressed → "Save/Download image", which is the ONE way to
+  // save that works inside WhatsApp's in-app browser (its WebView has no download
+  // manager, so the button's programmatic download silently fails there).
+  return `<div class="card"><h2>Pay ₹${esc(pay.amount)}</h2>
+    ${rejected ? `<p class="small err" style="margin:0 0 8px">The shop couldn't verify your last receipt. Please pay and upload a clear screenshot.</p>` : ""}
+    <p class="muted small" style="margin:0 0 8px">Scan this QR with any UPI app (GPay, PhonePe, Paytm…) and pay <b>₹${esc(pay.amount)}</b>.</p>
+    <div class="qrbox"><img src="${esc(pay.qrUrl)}" alt="UPI QR to pay ₹${esc(pay.amount)}" /></div>
+    <p class="muted small" style="text-align:center;margin:6px 0 0">${esc(pay.upi_name || "")} · ${esc(pay.upi_id || "")}</p>
+    <p class="muted small" style="text-align:center;margin:8px 0 0">Paying on this phone? <b>Press &amp; hold the QR → Save image</b>, then use <b>Scan from gallery</b> in your UPI app.</p>
+    <div class="row" style="justify-content:center;margin-top:10px">
+      <a class="ghost small grow0" id="qrsave" style="text-decoration:none;text-align:center"
+         href="${esc(pay.qrUrl)}"
+         download="${esc(order.id)}-upi-qr.png">⬇️ Or tap to save</a>
+    </div>
+    <p id="qrsaveMsg" class="muted small" style="margin:8px 0 0"></p>
+    <p class="small" style="margin:12px 0 6px"><b>After paying, upload the receipt</b> so the shop can confirm and start your order.</p>
+    ${payUploadHtml()}</div>`;
+}
+
+// Get the QR PNG into the phone's gallery. A plain <a download> pointing at a
+// server URL is unreliable on mobile — the browser tends to just navigate to and
+// display the image. So we fetch the bytes in-page (the token URL needs no
+// cookie), then hand them off through the most capable path available:
+//   1. Web Share with a File → native share sheet's "Save image / Download" —
+//      the real "save to gallery" action on Android + iOS, and it also sidesteps
+//      the WhatsApp-webview cookie/download issues since the fetch is in-page.
+//   2. A blob object-URL download — forces a save where the plain anchor wouldn't.
+//   3. Open the image so the user can long-press → Save image (last resort).
+async function saveQrToGallery(url, filename, msgEl) {
+  const hint = "📱 Paying on this phone? Save the QR, then use <b>Scan from gallery</b> in your UPI app.";
+  const say = (t, ok) => { if (msgEl) { msgEl.innerHTML = t; msgEl.className = ok === false ? "small err" : "muted small"; } };
+  say("Saving…");
+  let blob;
+  try {
+    const res = await fetch(url); // token URL → works without a session cookie
+    if (!res.ok) throw new Error("fetch " + res.status);
+    blob = await res.blob();
+  } catch (e) {
+    window.open(url, "_blank"); // can't fetch → at least show it so they can long-press → Save image
+    say("Opened the QR — long-press it and choose <b>Save image</b>.");
+    return;
+  }
+  const file = new File([blob], filename, { type: "image/png" });
+
+  // iOS has no reliable blob-download-to-gallery; its native path is the share
+  // sheet's "Save Image" (→ Photos). Android + desktop download blob URLs directly,
+  // which is the one-tap "save" people expect — a share sheet there just adds steps.
+  const iOS = /iP(hone|ad|od)/.test(navigator.userAgent) ||
+    (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1); // iPadOS masquerades as Mac
+  if (iOS && navigator.canShare && navigator.canShare({ files: [file] })) {
+    try { await navigator.share({ files: [file], title: "Payment QR" }); say(hint); return; }
+    catch (e) { if (e && e.name === "AbortError") { say(hint); return; } /* else fall through */ }
+  }
+
+  // In-app WebviewS (WhatsApp, FB, Instagram) have NO download manager, so a
+  // programmatic blob download silently no-ops — claiming "Saved" there is a lie.
+  // Detect that context (Android WebView tags its UA "; wv"; WhatsApp's browser is
+  // one) and, since Web Share is also usually unavailable, tell them the truth:
+  // press-and-hold the QR image above, which the WebView CAN save.
+  const inAppWebView = /; wv\)/.test(navigator.userAgent) || /\b(FBAN|FBAV|Instagram|Line)\b/.test(navigator.userAgent);
+  if (inAppWebView) {
+    say("Couldn't auto-save here. <b>Press &amp; hold the QR above → Save image</b>, then use <b>Scan from gallery</b> in your UPI app.", false);
+    return;
+  }
+
+  // Real browser: force a download from a blob object URL. Unlike a plain <a>
+  // pointing at the server URL — which browsers tend to just DISPLAY inline — a
+  // blob download is forced. Android Chrome lands it in Downloads (in the gallery).
+  try {
+    const obj = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = obj; a.download = filename;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(obj), 5000);
+    // We can't get a completion event, so keep the long-press path in view as a
+    // backstop rather than over-promising.
+    say(`Saving <b>${esc(filename)}</b>… If it's not in Downloads/gallery, press &amp; hold the QR above → <b>Save image</b>.`);
+  } catch (e) {
+    window.open(url, "_blank");
+    say("Opened the QR — press &amp; hold it and choose <b>Save image</b>.");
+  }
+}
+
+function payUploadHtml() {
+  return `<div class="row" style="gap:8px;margin-top:6px">
+      <label class="ghost small grow0" style="cursor:pointer;margin:0">📁 Choose screenshot
+        <input type="file" id="rcptFile" accept="image/*" hidden /></label>
+      <label class="ghost small grow0" style="cursor:pointer;margin:0">📷 Camera
+        <input type="file" id="rcptCam" accept="image/*" capture="environment" hidden /></label>
+    </div>
+    <p id="rcptMsg" class="small" style="margin:6px 0 0"></p>`;
+}
+
+// slug → Back returns to that shop's page. Without it we'd history.back() out of
+// the app entirely (a WhatsApp deep-link has no in-app history behind it).
+async function customerTrack(id, slug) {
+  const { order, pay, feeLabel } = await api(`/api/my/orders/${id}`);
+  const feeRow = order.delivery_fee
+    ? `<div class="row" style="align-items:baseline"><span class="muted" style="flex:1">Items</span><span class="muted">${money(order.items_total)}</span></div>
+       <div class="row" style="align-items:baseline"><span class="muted" style="flex:1">${esc(feeLabel || "Delivery fee")}</span><span class="muted">${money(order.delivery_fee)}</span></div>`
+    : "";
   const items = order.items
     .map((i) => `<li>${esc(i.name)} × ${i.qty}${i.unit_price ? ` <span class="muted">— ${money(i.qty * i.unit_price)}</span>` : ""}</li>`)
     .join("");
@@ -710,7 +1038,7 @@ async function customerTrack(id) {
   const imgs = (order.images || []).map((im) => `<a href="${im.data}" target="_blank" rel="noopener" class="pthumb"><img src="${im.data}" alt="uploaded photo" /></a>`).join("");
   const courier = order.ship_mode === "courier";
   const dispatchLine = courier
-    ? (order.courier_name ? `<span class="muted">· 📦 ${esc(order.courier_name)}${order.courier_tracking ? ` · ${esc(order.courier_tracking)}` : ""}</span>` : `<span class="muted">· 📦 Courier</span>`)
+    ? `<span class="muted">· 📦 ${order.courier_tracking ? "Shipped" : "Courier"}</span>`
     : order.agent_name ? `<span class="muted">· 🔧 ${esc(CFG.brand?.agentTerm || "Technician")}: ${esc(order.agent_name)}</span>`
     : order.delivery_captain_name ? `<span class="muted">· 🛵 ${esc(order.delivery_captain_name)}</span>` : "";
   const quoted = order.status === "QUOTED";
@@ -719,24 +1047,103 @@ async function customerTrack(id) {
     <div class="card">${badge(order.status)} ${dispatchLine}
       ${quoted ? `<p class="small" style="margin:8px 0 0">The shop has priced your order. Please review and confirm.</p>` : ""}
       <h2>Items</h2><ul>${items}</ul>
+      ${feeRow}
       <div class="row" style="align-items:baseline"><strong style="flex:1">Total</strong><strong style="flex:0 0 auto;font-size:17px">${money(order.total)}</strong></div>
       ${quoted ? `<div class="row" style="gap:8px;margin-top:12px"><button id="qaccept">✅ Accept order</button><button id="qreject" class="ghost">Reject</button></div><p id="qmsg" class="small"></p>` : ""}
-      ${courier && order.courier_tracking ? `<p class="small" style="margin-top:8px">📦 Shipped via <b>${esc(order.courier_name || "courier")}</b> · Tracking <b>${esc(order.courier_tracking)}</b></p>` : ""}
-      ${pay ? `<a href="${pay.upi}" class="paybtn">💳 Pay ₹${esc(pay.amount)} now</a><p class="muted small" style="margin:6px 0 0;text-align:center">Courier orders are prepaid — pay to confirm your shipment.</p>` : ""}
+      ${courier && order.courier_tracking ? `<a href="${esc(order.courier_tracking)}" target="_blank" rel="noopener" class="paybtn" style="background:#0b7">📦 Track your shipment</a>` : ""}
+      ${order.courier_receipt ? `<p class="muted small" style="margin:10px 0 4px">Courier receipt</p><a href="${order.courier_receipt}" target="_blank" rel="noopener"><img class="rcpt" src="${order.courier_receipt}" alt="courier receipt" /></a>` : ""}
       ${imgs ? `<h2>Your photos</h2><div class="pthumbs">${imgs}</div>` : ""}
       ${order.address ? `<p class="muted" style="margin-top:8px">${esc(order.address)}</p>` : ""}
     </div>
+    ${payCardHtml(order, pay)}
     <div class="card"><h2>Progress</h2><ul class="timeline">${tl}</ul></div>`);
-  document.getElementById("back").onclick = () => history.back();
+  document.getElementById("back").onclick = () => (slug ? renderCustomer(slug) : history.back());
+  // Receipt upload (both the file and camera inputs feed the same handler).
+  const rmsg = document.getElementById("rcptMsg");
+  const sendReceipt = async (file) => {
+    if (!file) return;
+    rmsg.className = "small"; rmsg.textContent = "Uploading…";
+    try {
+      const image = await downscaleImg(file);
+      await api(`/api/my/orders/${id}/receipt`, { method: "POST", body: { image } });
+      customerTrack(id, slug); // re-render → "under review"
+    } catch (e) {
+      rmsg.className = "small err";
+      rmsg.textContent = e.message === "bad_image" ? "That file isn't a readable image." : e.message;
+    }
+  };
+  document.getElementById("rcptFile")?.addEventListener("change", (e) => sendReceipt(e.target.files?.[0]));
+  document.getElementById("rcptCam")?.addEventListener("change", (e) => sendReceipt(e.target.files?.[0]));
+  const qrsave = document.getElementById("qrsave");
+  if (qrsave) qrsave.addEventListener("click", (e) => {
+    e.preventDefault();
+    saveQrToGallery(qrsave.getAttribute("href"), qrsave.getAttribute("download"), document.getElementById("qrsaveMsg"));
+  });
   if (quoted) {
     const confirm2 = async (accept) => {
       const m = document.getElementById("qmsg");
-      try { await api(`/api/my/orders/${id}/confirm`, { method: "POST", body: { accept } }); customerTrack(id); }
+      try { await api(`/api/my/orders/${id}/confirm`, { method: "POST", body: { accept } }); customerTrack(id, slug); }
       catch (e) { m.className = "small err"; m.textContent = e.message; }
     };
     document.getElementById("qaccept").onclick = () => confirm2(true);
     document.getElementById("qreject").onclick = () => { if (confirm("Reject this order? This cannot be undone.")) confirm2(false); };
   }
+}
+
+// ── Payment review (admin side) ─────────────────────────────────────────────
+// The shop verifies the customer's UPI receipt. Groq's read is a hint only — the
+// shop confirms, and confirming is what unlocks the rest of the flow.
+function payReviewHtml(order, ex) {
+  if (order.payment_method !== "upi") {
+    return order.payment_status === "paid"
+      ? `<div class="card"><h2>Payment</h2><p class="small" style="margin:0">✅ Paid${order.payment_ref ? ` · ${esc(order.payment_ref)}` : ""}</p></div>`
+      : `<div class="card"><h2>Payment</h2><p class="muted small" style="margin:0">💵 Cash on delivery — collect ${money(order.total)} from the customer.</p></div>`;
+  }
+  if (order.payment_status === "paid") {
+    return `<div class="card"><h2>Payment</h2>
+      <p class="small" style="margin:0"><b style="color:#0a7">✅ Confirmed</b> — ${money(order.payment_amount || order.total)}${order.payment_ref ? ` · ref ${esc(order.payment_ref)}` : ""}${order.payment_payer ? ` · ${esc(order.payment_payer)}` : ""}</p>
+      ${order.payment_receipt ? `<a href="${order.payment_receipt}" target="_blank" rel="noopener" style="display:inline-block;margin-top:8px"><img class="rcpt" src="${order.payment_receipt}" alt="payment receipt" /></a>` : ""}</div>`;
+  }
+  if (!order.payment_receipt) {
+    return `<div class="card"><h2>Payment</h2>
+      <p class="muted small" style="margin:0">🕗 Waiting for the customer to pay ${money(order.total)} and upload a receipt.${order.payment_status === "rejected" ? " (Their last receipt was rejected.)" : ""}</p></div>`;
+  }
+  const mismatch = ex && ex.mismatch;
+  const via = ex && ex.source === "whatsapp" ? ` <span class="badge ASSIGNED">via WhatsApp</span>` : "";
+  const read = ex && ex.ok !== false
+    ? `<ul class="small" style="margin:8px 0 0;padding-left:18px">
+         <li>Amount read: <b>${ex.amount != null ? money(ex.amount) : "—"}</b> ${mismatch ? `<span class="err">⚠️ order total is ${money(ex.expected)}</span>` : ex.amount != null ? "✅ matches the total" : ""}</li>
+         ${ex.orderRef ? `<li>Order note: <b>${esc(ex.orderRef)}</b></li>` : ""}
+         <li>Reference: ${ex.ref ? `<b>${esc(ex.ref)}</b>` : "—"}</li>
+         <li>Payer: ${ex.payer ? esc(ex.payer) : "—"}</li>
+         <li>Paid at: ${ex.paidAt ? esc(ex.paidAt) : "—"}${ex.status ? ` · ${esc(ex.status)}` : ""}</li>
+       </ul>
+       <p class="muted small" style="margin:6px 0 0">Read automatically${via ? " from a WhatsApp receipt" : ""} — check it against the image before confirming.</p>`
+    : `<p class="muted small" style="margin:8px 0 0">Couldn't read this receipt automatically — please check the image yourself.</p>`;
+  return `<div class="card"><h2>Payment — review${via}</h2>
+    <p class="small" style="margin:0 0 8px">Customer sent a receipt for <b>${money(order.total)}</b>. Confirm only if the money has actually reached your account.</p>
+    <a href="${order.payment_receipt}" target="_blank" rel="noopener"><img class="rcpt" src="${order.payment_receipt}" alt="payment receipt" /></a>
+    ${read}
+    <div class="row" style="gap:8px;margin-top:12px">
+      <button id="payok">✅ Confirm payment</button>
+      <button id="payno" class="ghost">Reject receipt</button>
+    </div>
+    <p id="paymsg" class="small" style="margin:6px 0 0"></p></div>`;
+}
+
+function wirePayReview(order, id, reload) {
+  const ok = document.getElementById("payok");
+  if (!ok) return;
+  const msg = document.getElementById("paymsg");
+  const send = async (action) => {
+    msg.className = "small"; msg.textContent = action === "confirm" ? "Confirming…" : "Rejecting…";
+    try {
+      await api(`/api/admin/orders/${encodeURIComponent(id)}/payment`, { method: "POST", body: { action } });
+      reload();
+    } catch (e) { msg.className = "small err"; msg.textContent = e.message; }
+  };
+  ok.onclick = () => { if (confirm(`Confirm you received ${money(order.total)} for ${order.id}?`)) send("confirm"); };
+  document.getElementById("payno").onclick = () => { if (confirm("Reject this receipt? The customer will be asked to upload another.")) send("reject"); };
 }
 
 // ── Admin (provider) ─────────────────────────────────────────────────────────
@@ -899,9 +1306,10 @@ async function ordersTab(container) {
 }
 
 async function adminOrder(id) {
-  const { order, customer, allowedNext, captains = [], fulfilment = "delivery" } = await api(`/api/admin/orders/${id}`);
+  const { order, customer, allowedNext, captains = [], fulfilment = "delivery", payExtracted = null, paymentBlocked = false, feeKind = null } = await api(`/api/admin/orders/${id}`);
   const isPhoto = (order.images || []).length > 0; // photo/list order → quote-and-confirm
   let draftItems = (order.items || []).map((i) => ({ name: i.name, qty: i.qty, price: i.unit_price || 0 }));
+  let draftFee = order.delivery_fee || 0; // shop-set courier/delivery fee (paise)
   const items = order.items
     .map((i) => `<li>${esc(i.name)} × ${i.qty}${i.unit_price ? ` <span class="muted">— ${money(i.qty * i.unit_price)}</span>` : ""}</li>`)
     .join("");
@@ -914,6 +1322,7 @@ async function adminOrder(id) {
     controls = `
       <p class="muted">${isPhoto ? "Review the items, set a price on each, then send the quote to the customer to confirm." : "This request is awaiting your decision."}</p>
       <div id="edititems"></div>
+      ${feeKind ? `<div class="row" style="align-items:center;margin-top:8px"><label style="flex:1;margin:0">${feeKind === "courier" ? "Courier" : "Delivery"} fee</label><div class="row grow0" style="gap:4px;align-items:center">₹<input id="draftFee" type="number" min="0" step="0.01" value="${(draftFee / 100).toFixed(2)}" style="width:80px" /></div></div>` : ""}
       <div class="row" style="align-items:baseline;margin-top:8px"><strong style="flex:1">Total</strong><strong id="draftTotal" style="font-size:16px">${money(0)}</strong></div>
       <div class="row" style="gap:6px;margin-top:10px;align-items:flex-end">
         <div style="flex:1"><label>Add item</label><input id="ni_name" placeholder="e.g. Tomato" /></div>
@@ -950,14 +1359,23 @@ async function adminOrder(id) {
       } else {
         picker = `<p class="muted">No ${term.toLowerCase()}s for this provider yet — add them in Providers → Edit → Captains.</p><input id="agent" value="${esc(current || "")}" placeholder="${term} name" />`;
       }
+      const courierInputs = `<label>Tracking link <span class="muted small">(optional)</span></label>
+        <input id="courierTracking" type="url" value="${esc(order.courier_tracking || "")}" placeholder="https://… courier tracking URL" />
+        <label style="margin-top:8px">Courier receipt photo <span class="muted small">(optional)</span></label>
+        <div class="row" style="gap:8px;align-items:center;margin-top:2px">
+          <img id="crcptprev" src="${order.courier_receipt || ""}" alt="" style="width:48px;height:48px;object-fit:cover;border-radius:8px;border:1px solid var(--border);${order.courier_receipt ? "" : "display:none"}" />
+          <label class="ghost small grow0" style="cursor:pointer;margin:0">📷 ${order.courier_receipt ? "Change" : "Add"} receipt<input type="file" id="crcpt" accept="image/*" hidden /></label>
+          <span id="crcptname" class="muted small"></span>
+        </div>
+        <p class="muted small" style="margin:4px 0 0">Add a tracking link, a receipt photo, or both. We'll send the link to the customer.</p>`;
       if (forcedCourier) {
-        agentField = `<label>Courier company</label><input id="courierName" value="${esc(order.courier_name || "")}" placeholder="DTDC, Delhivery, India Post…" /><label style="margin-top:6px">Tracking number</label><input id="courierTracking" value="${esc(order.courier_tracking || "")}" placeholder="Consignment / AWB number" />`;
+        agentField = courierInputs;
       } else if (courierable) {
         const startCourier = fulfilment === "courier";
         agentField = `
           ${fulfilment === "both" ? `<label>Fulfilment</label><div class="row" style="gap:6px;margin-bottom:6px"><button type="button" class="ghost small grow0 fmode${startCourier ? "" : " sel"}" data-mode="delivery">🛵 Own agent</button><button type="button" class="ghost small grow0 fmode${startCourier ? " sel" : ""}" data-mode="courier">📦 Courier</button></div>` : ""}
           <div id="deliverFields" style="display:${startCourier ? "none" : "block"}"><label>${label}</label>${picker}</div>
-          <div id="courierFields" style="display:${startCourier ? "block" : "none"}"><label>Courier company</label><input id="courierName" value="${esc(order.courier_name || "")}" placeholder="DTDC, Delhivery, India Post…" /><label style="margin-top:6px">Tracking number</label><input id="courierTracking" value="${esc(order.courier_tracking || "")}" placeholder="Consignment / AWB number" /></div>`;
+          <div id="courierFields" style="display:${startCourier ? "block" : "none"}">${courierInputs}</div>`;
       } else if (onsite && captains.length) {
         const assigned = new Set((order.assignees || []).map((a) => a.phone));
         agentField = `<label>Assign ${term.toLowerCase()}s <span class="muted small">— pick one or more</span></label>
@@ -966,7 +1384,11 @@ async function adminOrder(id) {
         agentField = `<label>${label}</label>${picker}`;
       }
     }
-    controls = `
+    // A UPI order can't move past accept until payment is confirmed — say so
+    // instead of offering a button that will 400.
+    controls = paymentBlocked
+      ? `<p class="muted" style="margin:0">💳 Waiting on payment — confirm the customer's payment below before starting this order.</p>`
+      : `
       ${agentField}
       <button id="save" data-next="${next}" data-courierable="${courierable ? 1 : 0}" data-forcedcourier="${forcedCourier ? 1 : 0}" data-onsite="${onsite && captains.length ? 1 : 0}" data-start="${courierable && fulfilment === "courier" ? "courier" : "delivery"}" style="margin-top:12px">Advance to ${nextLabel} & notify</button>
       <p id="msg"></p>`;
@@ -982,17 +1404,21 @@ async function adminOrder(id) {
         ? `<p class="muted" style="margin-top:8px">🔧 ${esc(CFG.brand?.agentTerm || "Technician")}s: ${order.assignees.map((a) => `${esc(a.name || a.phone)}${a.phone ? ` <a href="tel:${esc(a.phone)}">${esc(a.phone)}</a>` : ""}`).join(", ")}</p>`
         : order.agent_name ? `<p class="muted" style="margin-top:8px">🔧 ${esc(CFG.brand?.agentTerm || "Technician")}: ${esc(order.agent_name)}${order.captain_phone ? ` · <a href="tel:${esc(order.captain_phone)}">${esc(order.captain_phone)}</a>` : ""}</p>` : ""}
       ${order.delivery_captain_name ? `<p class="muted" style="margin-top:4px">🛵 ${esc(order.delivery_captain_name)}${order.delivery_captain_phone ? ` · <a href="tel:${esc(order.delivery_captain_phone)}">${esc(order.delivery_captain_phone)}</a>` : ""}</p>` : ""}
-      ${order.ship_mode === "courier" && order.courier_name ? `<p class="muted" style="margin-top:4px">📦 ${esc(order.courier_name)}${order.courier_tracking ? ` · Tracking ${esc(order.courier_tracking)}` : ""}</p>` : ""}
+      ${order.ship_mode === "courier" && order.courier_tracking ? `<p class="muted" style="margin-top:4px">📦 Tracking: <a href="${esc(order.courier_tracking)}" target="_blank" rel="noopener">${esc(order.courier_tracking)}</a></p>` : ""}
+      ${order.courier_receipt ? `<a href="${order.courier_receipt}" target="_blank" rel="noopener" style="display:inline-block;margin-top:6px"><img class="rcpt" src="${order.courier_receipt}" alt="courier receipt" style="max-width:150px;max-height:190px" /></a>` : ""}
       <h2>Customer</h2>
       <p>${esc(customer?.name || "—")} · ${esc(customer?.wa_phone || "")}</p>
       ${order.contact_name || order.contact_phone ? `<p class="muted">Pickup contact: ${esc(order.contact_name || "")}${order.contact_phone ? " · " + esc(order.contact_phone) : ""}</p>` : ""}
       ${order.address ? `<p class="muted">${esc(order.address)}</p>` : ""}
       ${order.lat != null ? `<p class="muted">📍 <a href="https://www.google.com/maps?q=${order.lat},${order.lng}" target="_blank" rel="noopener">${(+order.lat).toFixed(5)}, ${(+order.lng).toFixed(5)} — view on map</a></p>` : ""}
       <h2>Items</h2><ul>${items}</ul>
+      ${order.delivery_fee ? `<div class="row" style="align-items:baseline"><span class="muted small" style="flex:1">Items</span><span class="muted small">${money(order.items_total)}</span></div><div class="row" style="align-items:baseline"><span class="muted small" style="flex:1">${feeKind === "courier" ? "Courier" : "Delivery"} fee</span><span class="muted small">${money(order.delivery_fee)}</span></div>` : ""}
       <div class="row" style="align-items:baseline"><strong style="flex:1">Total</strong><strong style="flex:0 0 auto;font-size:17px">${money(order.total)}</strong></div>
     </div>
+    ${payReviewHtml(order, payExtracted)}
     <div class="card"><h2>Action</h2>${controls}</div>
     <div class="card"><h2>History</h2><ul class="timeline">${tl}</ul></div>`);
+  wirePayReview(order, id, () => adminOrder(id));
   document.getElementById("back").onclick = () => renderDashboard("orders");
 
   const patch = async (status, agentName, captainPhone, courier) => {
@@ -1004,6 +1430,15 @@ async function adminOrder(id) {
       msg.className = "err";
       msg.textContent = e.message === "invalid_transition" ? "That status change isn't allowed." : e.message;
     }
+  };
+  // Courier receipt photo upload (undefined = leave as-is; string = new photo).
+  let courierReceipt;
+  const crcptEl = document.getElementById("crcpt");
+  if (crcptEl) crcptEl.onchange = async (e) => {
+    const f = e.target.files?.[0]; if (!f) return;
+    const nm = document.getElementById("crcptname");
+    try { courierReceipt = await downscaleImg(f); const p = document.getElementById("crcptprev"); p.src = courierReceipt; p.style.display = ""; nm.className = "muted small"; nm.textContent = "✓ receipt ready"; }
+    catch { nm.className = "small err"; nm.textContent = "couldn't read image"; }
   };
   // Delivery ↔ courier toggle (rendered only when the provider allows courier).
   let shipMode = document.getElementById("save")?.dataset.start === "courier" ? "courier" : "delivery";
@@ -1018,7 +1453,9 @@ async function adminOrder(id) {
   // REQUESTED item editor (reconcile + price) — mirrors the manager app.
   const ebox = document.getElementById("edititems");
   if (ebox) {
-    const recalcDraft = () => { const el = document.getElementById("draftTotal"); if (el) el.textContent = money(draftItems.reduce((s, it) => s + (it.price || 0) * it.qty, 0)); };
+    const recalcDraft = () => { const el = document.getElementById("draftTotal"); if (el) el.textContent = money(draftItems.reduce((s, it) => s + (it.price || 0) * it.qty, 0) + draftFee); };
+    const feeEl = document.getElementById("draftFee");
+    if (feeEl) feeEl.onchange = () => { draftFee = Math.round((parseFloat(feeEl.value) || 0) * 100); recalcDraft(); };
     const paint = () => {
       ebox.innerHTML = draftItems.length
         ? draftItems.map((it, idx) => `<div class="summary-line" data-idx="${idx}"><span style="flex:1">${esc(it.name)}</span><input class="dprice" type="number" min="0" step="0.01" value="${it.price ? (it.price / 100) : ""}" placeholder="₹" style="width:64px;margin-right:6px" /><div class="qtyctrl"><button type="button" class="qbtn dminus">−</button><input class="qnum dqty" type="number" min="1" value="${it.qty}" style="width:46px" /><button type="button" class="qbtn dplus">+</button></div><button type="button" class="qbtn drm" style="margin-left:6px">✕</button></div>`).join("")
@@ -1049,7 +1486,7 @@ async function adminOrder(id) {
       const msg = document.getElementById("msg");
       if (!draftItems.length) { msg.className = "err"; msg.textContent = "Add at least one item."; return; }
       try {
-        await api(`/api/admin/orders/${id}/items`, { method: "PATCH", body: { items: draftItems.map((i) => ({ name: i.name, qty: i.qty, price: i.price || 0 })) } });
+        await api(`/api/admin/orders/${id}/items`, { method: "PATCH", body: { items: draftItems.map((i) => ({ name: i.name, qty: i.qty, price: i.price || 0 })), deliveryFee: draftFee } });
       } catch (e) { msg.className = "err"; msg.textContent = e.message === "not_editable" ? "Order already moved on." : e.message; return; }
       patch(isPhoto ? "QUOTED" : "ACCEPTED");
     };
@@ -1061,10 +1498,11 @@ async function adminOrder(id) {
   if (saveBtn) {
     saveBtn.onclick = () => {
       if (saveBtn.dataset.forcedcourier === "1" || (saveBtn.dataset.courierable === "1" && shipMode === "courier")) {
-        const cn = document.getElementById("courierName")?.value.trim() || "";
         const ct = document.getElementById("courierTracking")?.value.trim() || "";
-        if (!cn) { const m = document.getElementById("msg"); m.className = "err"; m.textContent = "Enter the courier company."; return; }
-        patch(saveBtn.dataset.next, "", "", { shipMode: "courier", courierName: cn, courierTracking: ct });
+        const m = document.getElementById("msg");
+        if (ct && !/^https?:\/\//i.test(ct)) { m.className = "err"; m.textContent = "Enter a valid link starting with http:// or https://"; return; }
+        if (!ct && courierReceipt === undefined && !order.courier_receipt) { m.className = "err"; m.textContent = "Add a tracking link or a receipt photo."; return; }
+        patch(saveBtn.dataset.next, "", "", { shipMode: "courier", courierTracking: ct, ...(courierReceipt !== undefined ? { courierReceipt } : {}) });
         return;
       }
       if (saveBtn.dataset.onsite === "1") {

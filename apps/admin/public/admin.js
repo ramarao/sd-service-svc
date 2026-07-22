@@ -318,8 +318,13 @@ async function providerDetail(townId, p) {
         ? `<label style="margin-top:8px">Fulfilment <span class="muted small">— how orders leave the shop</span></label>
       <select id="p_fulfilment">${["delivery", "courier", "both"].map((m) => `<option value="${m}" ${(p.fulfilment || "delivery") === m ? "selected" : ""}>${{ delivery: "Own delivery agent", courier: "Courier only", both: "Both (choose per order)" }[m]}</option>`).join("")}</select>`
         : flowCourier
-        ? `<label style="margin-top:8px">Fulfilment</label><p class="muted small" style="margin:0">📦 Courier — the courier &amp; tracking are entered when each order is shipped.</p>`
+        ? `<label style="margin-top:8px">Fulfilment</label><p class="muted small" style="margin:0">📦 Courier — a tracking link is entered when each order is shipped, and sent to the customer.</p>`
         : `<label style="margin-top:8px">Fulfilment</label><p class="muted small" style="margin:0">On-site service — no delivery or courier.</p>`}
+      ${flowCourier
+        ? `<label style="margin-top:8px">Payment</label><p class="muted small" style="margin:0">💳 Prepaid UPI — the parcel ships once the shop confirms the customer's payment. A UPI ID is required.${p.upi_id ? "" : ` <b class="err">Set one above.</b>`}</p>`
+        : `<label style="margin-top:8px">Payment <span class="muted small">— how this shop takes money</span></label>
+      <select id="p_payment">${["cod", "upi", "both"].map((m) => `<option value="${m}" ${(p.payment_method || "cod") === m ? "selected" : ""}>${{ cod: "Cash on delivery", upi: "Pay online (UPI)", both: "Both (customer chooses)" }[m]}</option>`).join("")}</select>
+      <p class="muted small" style="margin:4px 0 0">Online orders wait for the shop to confirm the customer's payment receipt before they can be started.${p.upi_id ? "" : ` <b class="err">Needs a UPI ID above.</b>`}</p>`}
       <label class="row" style="margin-top:12px;gap:8px;align-items:center;cursor:pointer">
         <input type="checkbox" id="p_photo" ${p.photo_order ? "checked" : ""} style="width:auto;margin:0" />
         <span>Photo / list upload <span class="muted small">— customer can send a picture or item list; Groq reads it and pre-fills the order</span></span>
@@ -365,7 +370,7 @@ async function providerDetail(townId, p) {
 
   document.getElementById("psave").onclick = async () => {
     const msg = document.getElementById("pmsg");
-    try { await api(A(""), { method: "PATCH", body: { name: v("p_name"), slug: slugify(v("p_slug")), code: v("p_code"), vertical: v("p_vertical"), upi_id: v("p_upi"), fulfilment: document.getElementById("p_fulfilment")?.value, photo_order: document.getElementById("p_photo").checked } }); msg.className = "small"; msg.textContent = "Saved ✓"; }
+    try { await api(A(""), { method: "PATCH", body: { name: v("p_name"), slug: slugify(v("p_slug")), code: v("p_code"), vertical: v("p_vertical"), upi_id: v("p_upi"), fulfilment: document.getElementById("p_fulfilment")?.value, payment_method: document.getElementById("p_payment")?.value, photo_order: document.getElementById("p_photo").checked } }); msg.className = "small"; msg.textContent = "Saved ✓"; }
     catch (e) { msg.className = "err"; msg.textContent = e.message; }
   };
   document.getElementById("pdel").onclick = async () => {

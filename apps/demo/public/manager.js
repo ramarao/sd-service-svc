@@ -15,8 +15,12 @@ const badge = (s) => `<span class="badge ${esc(s)}">${esc(s.replace(/_/g, " "))}
 const fmtDate = (ms) => new Date(ms).toLocaleString();
 const CUR = { INR: "₹", USD: "$", EUR: "€", GBP: "£" };
 const money = (paise) => "₹" + (Number(paise || 0) / 100).toLocaleString("en-IN", { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+// Payment at a glance in the orders list. 'submitted' is the one that needs the
+// shop to DO something, so it gets a pill of its own rather than reading as failed.
 const paidPill = (o) =>
   o.payment_status === "paid" ? `<span class="paid-pill">✅ Paid</span>`
+  : o.payment_status === "submitted" ? `<span class="paid-pill review">🕗 Check payment</span>`
+  : o.payment_status === "rejected" ? `<span class="paid-pill fail">❌ Receipt rejected</span>`
   : o.payment_status === "failed" ? `<span class="paid-pill fail">❌ Failed</span>` : "";
 
 function openModal(title, innerHTML) {
@@ -61,9 +65,18 @@ function liveRefresh() {
 // ── Entry ───────────────────────────────────────────────────────────────────
 async function boot() {
   try { const cfg = await api("/api/config"); state.flow = cfg.flow || {}; state.brand = cfg.brand || {}; } catch {}
+  // A new-order alert lands here as /manager?order=…&provider=… — open that order
+  // directly. Strip the params first so a reload doesn't re-open it.
+  const q = new URLSearchParams(location.search);
+  const deepOrder = q.get("order"), deepProvider = q.get("provider");
+  if (deepOrder) history.replaceState(null, "", "/manager");
   let me;
   try { me = await api("/api/manager/me"); } catch { return screenAuth(); }
   state.phone = me.phone; state.name = me.name || ""; state.providers = me.providers || [];
+  if (deepOrder && deepProvider) {
+    const p = state.providers.find((x) => x.id === deepProvider);
+    if (p) return selectProvider(p, deepOrder);
+  }
   if (me.provider_id) {
     const p = state.providers.find((x) => x.id === me.provider_id);
     state.providerId = me.provider_id; state.providerName = p?.name || ""; state.tier = me.tier;
@@ -75,12 +88,14 @@ async function boot() {
   }
 }
 
-async function selectProvider(p) {
+// openOrderId → jump straight to that order once the dashboard is up (new-order alert).
+async function selectProvider(p, openOrderId) {
   h(`<div class="cap-hero"><div class="cap-logo">🗂️</div><p class="muted">Opening ${esc(p.name)}…</p></div>`);
   try {
     const r = await api("/api/manager/select", { method: "POST", body: { providerId: p.id } });
     state.providerId = p.id; state.providerName = r.provider.name; state.tier = r.tier; state.tab = "orders";
-    dashboard();
+    await dashboard();
+    if (openOrderId) orderDetail(openOrderId);
   } catch (e) { screenProviders(e.message); }
 }
 
@@ -214,12 +229,70 @@ async function tabOrders() {
   loadOrders();
 }
 
+// ── Payment review ──────────────────────────────────────────────────────────
+// The shop verifies the customer's UPI receipt. Groq's read is shown as a hint
+// only — the shop confirms, and confirming is what unlocks the rest of the flow.
+function payReviewHtml(order, ex) {
+  if (order.payment_method !== "upi") {
+    return order.payment_status === "paid"
+      ? `<div class="card"><h2 style="margin-top:0">Payment</h2><p class="small" style="margin:0">✅ Paid${order.payment_ref ? ` · ${esc(order.payment_ref)}` : ""}</p></div>`
+      : `<div class="card"><h2 style="margin-top:0">Payment</h2><p class="muted small" style="margin:0">💵 Cash on delivery — collect ${money(order.total)} from the customer.</p></div>`;
+  }
+  if (order.payment_status === "paid") {
+    return `<div class="card"><h2 style="margin-top:0">Payment</h2>
+      <p class="small" style="margin:0"><b style="color:#0a7">✅ Confirmed</b> — ${money(order.payment_amount || order.total)}${order.payment_ref ? ` · ref ${esc(order.payment_ref)}` : ""}${order.payment_payer ? ` · ${esc(order.payment_payer)}` : ""}</p>
+      ${order.payment_receipt ? `<a href="${order.payment_receipt}" target="_blank" rel="noopener" style="display:inline-block;margin-top:8px"><img class="rcpt" src="${order.payment_receipt}" alt="payment receipt" /></a>` : ""}</div>`;
+  }
+  if (!order.payment_receipt) {
+    return `<div class="card"><h2 style="margin-top:0">Payment</h2>
+      <p class="muted small" style="margin:0">🕗 Waiting for the customer to pay ${money(order.total)} and upload a receipt.${order.payment_status === "rejected" ? " (Their last receipt was rejected.)" : ""}</p></div>`;
+  }
+  // Receipt in hand → show it big enough to read, with Groq's read beside it.
+  const mismatch = ex && ex.mismatch;
+  const via = ex && ex.source === "whatsapp" ? ` <span class="badge ASSIGNED">via WhatsApp</span>` : "";
+  const read = ex && ex.ok !== false
+    ? `<ul class="small" style="margin:8px 0 0;padding-left:18px">
+         <li>Amount read: <b>${ex.amount != null ? money(ex.amount) : "—"}</b> ${mismatch ? `<span class="err">⚠️ order total is ${money(ex.expected)}</span>` : ex.amount != null ? "✅ matches the total" : ""}</li>
+         ${ex.orderRef ? `<li>Order note: <b>${esc(ex.orderRef)}</b></li>` : ""}
+         <li>Reference: ${ex.ref ? `<b>${esc(ex.ref)}</b>` : "—"}</li>
+         <li>Payer: ${ex.payer ? esc(ex.payer) : "—"}</li>
+         <li>Paid at: ${ex.paidAt ? esc(ex.paidAt) : "—"}${ex.status ? ` · ${esc(ex.status)}` : ""}</li>
+       </ul>
+       <p class="muted small" style="margin:6px 0 0">Read automatically${via ? " from a WhatsApp receipt" : ""} — check it against the image before confirming.</p>`
+    : `<p class="muted small" style="margin:8px 0 0">Couldn't read this receipt automatically — please check the image yourself.</p>`;
+  return `<div class="card"><h2 style="margin-top:0">Payment — review${via}</h2>
+    <p class="small" style="margin:0 0 8px">Customer sent a receipt for <b>${money(order.total)}</b>. Confirm only if the money has actually reached your account.</p>
+    <a href="${order.payment_receipt}" target="_blank" rel="noopener"><img class="rcpt" src="${order.payment_receipt}" alt="payment receipt" /></a>
+    ${read}
+    <div class="row" style="gap:8px;margin-top:12px">
+      <button id="payok">✅ Confirm payment</button>
+      <button id="payno" class="ghost">Reject receipt</button>
+    </div>
+    <p id="paymsg" class="small" style="margin:6px 0 0"></p></div>`;
+}
+
+function wirePayReview(order, id, reload) {
+  const ok = document.getElementById("payok");
+  if (!ok) return;
+  const msg = document.getElementById("paymsg");
+  const send = async (action) => {
+    msg.className = "small"; msg.textContent = action === "confirm" ? "Confirming…" : "Rejecting…";
+    try {
+      await api(`/api/admin/orders/${encodeURIComponent(id)}/payment`, { method: "POST", body: { action } });
+      reload();
+    } catch (e) { msg.className = "small err"; msg.textContent = e.message; }
+  };
+  ok.onclick = () => { if (confirm(`Confirm you received ${money(order.total)} for ${order.id}?`)) send("confirm"); };
+  document.getElementById("payno").onclick = () => { if (confirm("Reject this receipt? The customer will be asked to upload another.")) send("reject"); };
+}
+
 async function orderDetail(id) {
   h(`<div class="topbar"><h1>Order</h1><button class="ghost small" id="back">←</button></div><p class="muted">Loading…</p>`);
   document.getElementById("back").onclick = dashboard;
   let d;
   try { d = await api(`/api/admin/orders/${encodeURIComponent(id)}`); } catch (e) { content && (el.innerHTML = `<div class="card"><p class="err">${esc(e.message)}</p></div>`); return; }
-  const { order, customer, allowedNext = [], captains = [], fulfilment = "delivery" } = d;
+  const { order, customer, allowedNext = [], captains = [], fulfilment = "delivery", payExtracted = null, paymentBlocked = false, feeKind = null } = d;
+  let draftFee = order.delivery_fee || 0; // shop-set courier/delivery fee (paise)
   const items = (order.items || []).map((i) => `<li>${esc(i.name)} × ${i.qty}${i.unit_price ? ` <span class="muted">— ${money(i.qty * i.unit_price)}</span>` : ""}</li>`).join("");
 
   // Before accepting, the manager can reconcile the item list — essential for
@@ -227,12 +300,10 @@ async function orderDetail(id) {
   const editable = order.status === "REQUESTED";
   const isPhoto = (order.images || []).length > 0; // photo/list order → quote-and-confirm
   let draftItems = (order.items || []).map((i) => ({ name: i.name, qty: i.qty, price: i.unit_price || 0 }));
-  const paymentLine = order.payment_status
-    ? `<p class="small" style="margin:8px 0 0">${order.payment_status === "paid" ? "✅ <b>Paid</b>" : "❌ <b>Payment failed</b>"}${order.payment_amount ? " · " + money(order.payment_amount) : ""}${order.payment_payer ? " · " + esc(order.payment_payer) : ""}${order.payment_ref ? ` <span class="muted">(ref ${esc(order.payment_ref)})</span>` : ""}</p>`
-    : `<p class="muted small" style="margin:8px 0 0">Payment: awaiting</p>`;
   const itemsCardHtml = editable
     ? `<div class="card"><h2 style="margin-top:0">Items <span class="muted small">— review${isPhoto ? " &amp; price" : ""} before ${isPhoto ? "quoting" : "accepting"}</span></h2>
         <div id="edititems"></div>
+        ${feeKind ? `<div class="row" style="align-items:center;margin-top:8px"><label style="flex:1;margin:0">${feeKind === "courier" ? "Courier" : "Delivery"} fee</label><div class="row grow0" style="gap:4px;align-items:center">₹<input id="draftFee" type="number" min="0" step="0.01" value="${(draftFee / 100).toFixed(2)}" style="width:80px" /></div></div>` : ""}
         <div class="row" style="align-items:baseline;margin-top:8px"><strong style="flex:1">Total</strong><strong id="draftTotal" style="font-size:16px">${money(0)}</strong></div>
         <div class="row" style="gap:6px;margin-top:10px;align-items:flex-end">
           <div style="flex:1"><label>Add item</label><input id="ni_name" placeholder="e.g. Tomato" /></div>
@@ -242,8 +313,9 @@ async function orderDetail(id) {
         </div>
         <p id="imsg" class="small"></p></div>`
     : `<div class="card"><h2 style="margin-top:0">Items</h2><ul>${items || '<li class="muted">No items</li>'}</ul>
+        ${order.delivery_fee ? `<div class="row" style="align-items:baseline"><span class="muted small" style="flex:1">Items</span><span class="muted small">${money(order.items_total)}</span></div><div class="row" style="align-items:baseline"><span class="muted small" style="flex:1">${feeKind === "courier" ? "Courier" : "Delivery"} fee</span><span class="muted small">${money(order.delivery_fee)}</span></div>` : ""}
         <div class="row" style="align-items:baseline"><strong style="flex:1">Total</strong><strong style="font-size:17px">${money(order.total)}</strong></div>
-        ${paymentLine}</div>`;
+        </div>`;
   // Customer-uploaded photos/lists (tap to view full size).
   const imagesCardHtml = (order.images || []).length
     ? `<div class="card"><h2 style="margin-top:0">Customer photos</h2><div class="pthumbs">${order.images.map((im) => `<a href="${im.data}" target="_blank" rel="noopener" class="pthumb"><img src="${im.data}" alt="customer photo" /></a>`).join("")}</div></div>`
@@ -262,6 +334,17 @@ async function orderDetail(id) {
     const forcedCourier = asg && asg.role === "courier";
     // Courier is an alternative to a delivery-type assignment when the provider allows it.
     const courierable = asg && asg.role === "delivery" && (fulfilment === "courier" || fulfilment === "both");
+    // Courier dispatch inputs: a tracking link and/or a receipt photo — either or both.
+    const courierInputs = `
+      <label>Tracking link <span class="muted small">(optional)</span></label>
+      <input id="courierTracking" type="url" value="${esc(order.courier_tracking || "")}" placeholder="https://… courier tracking URL" />
+      <label style="margin-top:8px">Courier receipt photo <span class="muted small">(optional)</span></label>
+      <div class="row" style="gap:8px;align-items:center;margin-top:2px">
+        <img id="crcptprev" src="${order.courier_receipt || ""}" alt="" style="width:48px;height:48px;object-fit:cover;border-radius:8px;border:1px solid var(--border);${order.courier_receipt ? "" : "display:none"}" />
+        <label class="ghost small grow0" style="cursor:pointer;margin:0">📷 ${order.courier_receipt ? "Change" : "Add"} receipt<input type="file" id="crcpt" accept="image/*" hidden /></label>
+        <span id="crcptname" class="muted small"></span>
+      </div>
+      <p class="muted small" style="margin:4px 0 0">Add a tracking link, a receipt photo, or both. We'll send the link to the customer.</p>`;
     // On-site flows (no delivery/courier step, e.g. plumber) can assign several captains.
     const onsite = asg && asg.role !== "courier" && !(state.flow.assignments || []).some((a) => a.role === "delivery");
     if (asg) {
@@ -276,8 +359,7 @@ async function orderDetail(id) {
         picker = `<p class="muted small">No ${esc(term.toLowerCase())}s yet — add them in the Captains tab.</p><input id="agent" value="${esc(cur || "")}" placeholder="${esc(term)} name" />`;
       }
       if (forcedCourier) {
-        agentField = `<label>Courier company</label><input id="courierName" value="${esc(order.courier_name || "")}" placeholder="DTDC, Delhivery, India Post…" />
-          <label style="margin-top:6px">Tracking number</label><input id="courierTracking" value="${esc(order.courier_tracking || "")}" placeholder="Consignment / AWB number" />`;
+        agentField = courierInputs;
       } else if (courierable) {
         // fulfilment 'courier' → courier only; 'both' → let the manager choose.
         const startCourier = fulfilment === "courier";
@@ -285,10 +367,7 @@ async function orderDetail(id) {
           ${fulfilment === "both" ? `<label>Fulfilment</label>
           <div class="row" style="gap:6px;margin-bottom:6px"><button type="button" class="ghost small grow0 fmode${startCourier ? "" : " sel"}" data-mode="delivery">🛵 Own agent</button><button type="button" class="ghost small grow0 fmode${startCourier ? " sel" : ""}" data-mode="courier">📦 Courier</button></div>` : ""}
           <div id="deliverFields" style="display:${startCourier ? "none" : "block"}"><label>Assign ${esc(term.toLowerCase())}</label>${picker}</div>
-          <div id="courierFields" style="display:${startCourier ? "block" : "none"}">
-            <label>Courier company</label><input id="courierName" value="${esc(order.courier_name || "")}" placeholder="DTDC, Delhivery, India Post…" />
-            <label style="margin-top:6px">Tracking number</label><input id="courierTracking" value="${esc(order.courier_tracking || "")}" placeholder="Consignment / AWB number" />
-          </div>`;
+          <div id="courierFields" style="display:${startCourier ? "block" : "none"}">${courierInputs}</div>`;
       } else if (onsite && captains.length) {
         const assigned = new Set((order.assignees || []).map((a) => a.phone));
         agentField = `<label>Assign ${esc(term.toLowerCase())}s <span class="muted small">— pick one or more</span></label>
@@ -297,7 +376,11 @@ async function orderDetail(id) {
         agentField = `<label>Assign ${esc(term.toLowerCase())}</label>${picker}`;
       }
     }
-    controls = `${agentField}<button id="save" data-next="${next}" data-courierable="${courierable ? 1 : 0}" data-forcedcourier="${forcedCourier ? 1 : 0}" data-onsite="${onsite && captains.length ? 1 : 0}" data-start="${courierable && fulfilment === "courier" ? "courier" : "delivery"}" style="margin-top:12px">Advance to ${next.replace(/_/g, " ")} &amp; notify</button><p id="msg"></p>`;
+    // A UPI order can't move past accept until payment is confirmed — say so
+    // instead of letting them hit a button that will 400.
+    controls = paymentBlocked
+      ? `<p class="muted" style="margin:0">💳 Waiting on payment — confirm the customer's payment below before starting this order.</p>`
+      : `${agentField}<button id="save" data-next="${next}" data-courierable="${courierable ? 1 : 0}" data-forcedcourier="${forcedCourier ? 1 : 0}" data-onsite="${onsite && captains.length ? 1 : 0}" data-start="${courierable && fulfilment === "courier" ? "courier" : "delivery"}" style="margin-top:12px">Advance to ${next.replace(/_/g, " ")} &amp; notify</button><p id="msg"></p>`;
   } else {
     controls = `<p class="muted">${order.status === (state.flow.decision?.reject) ? "Rejected — no further action." : "Complete — no further action."}</p>`;
   }
@@ -313,18 +396,30 @@ async function orderDetail(id) {
         ? `<p class="muted small" style="margin:6px 0 0">🔧 ${esc(state.brand?.agentTerm || "Technician")}s: ${order.assignees.map((a) => `${esc(a.name || a.phone)}${a.phone ? ` <a href="tel:${esc(a.phone)}">${esc(a.phone)}</a>` : ""}`).join(", ")}</p>`
         : order.agent_name ? `<p class="muted small" style="margin:6px 0 0">🔧 ${esc(state.brand?.agentTerm || "Technician")}: ${esc(order.agent_name)}${order.captain_phone ? ` · <a href="tel:${esc(order.captain_phone)}">${esc(order.captain_phone)}</a>` : ""}</p>` : ""}
       ${order.delivery_captain_name ? `<p class="muted small" style="margin:2px 0 0">🛵 ${esc(order.delivery_captain_name)}${order.delivery_captain_phone ? ` · <a href="tel:${esc(order.delivery_captain_phone)}">${esc(order.delivery_captain_phone)}</a>` : ""}</p>` : ""}
-      ${order.ship_mode === "courier" && order.courier_name ? `<p class="muted small" style="margin:6px 0 0">📦 ${esc(order.courier_name)}${order.courier_tracking ? ` · Tracking ${esc(order.courier_tracking)}` : ""}</p>` : ""}
+      ${order.ship_mode === "courier" && order.courier_tracking ? `<p class="muted small" style="margin:6px 0 0">📦 Tracking: <a href="${esc(order.courier_tracking)}" target="_blank" rel="noopener">${esc(order.courier_tracking)}</a></p>` : ""}
+      ${order.courier_receipt ? `<a href="${order.courier_receipt}" target="_blank" rel="noopener" style="display:inline-block;margin:6px 0 0"><img class="rcpt" src="${order.courier_receipt}" alt="courier receipt" style="max-width:140px;max-height:180px" /></a>` : ""}
     </div>
     ${itemsCardHtml}
     ${imagesCardHtml}
+    ${payReviewHtml(order, payExtracted)}
     <div class="card"><h2 style="margin-top:0">Action</h2>${controls}</div>
     <div class="card"><h2 style="margin-top:0">History</h2><ul class="timeline">${(order.events || []).map((e) => `<li>${badge(e.status)} <span class="muted">${fmtDate(e.at)} · ${esc(e.actor)}</span></li>`).join("")}</ul></div>`);
   document.getElementById("back").onclick = dashboard;
+  wirePayReview(order, id, () => orderDetail(id));
 
   const patch = async (status, agentName, captainPhone, courier) => {
     const msg = document.getElementById("msg");
     try { await api(`/api/admin/orders/${encodeURIComponent(id)}/status`, { method: "PATCH", body: { status, agentName, captainPhone, ...(courier || {}) } }); orderDetail(id); }
     catch (e) { msg.className = "err"; msg.textContent = e.message === "invalid_transition" ? "That change isn't allowed." : e.message; }
+  };
+  // Courier receipt photo upload (undefined = leave as-is; string = new photo).
+  let courierReceipt;
+  const crcpt = document.getElementById("crcpt");
+  if (crcpt) crcpt.onchange = async (e) => {
+    const f = e.target.files?.[0]; if (!f) return;
+    const nm = document.getElementById("crcptname");
+    try { courierReceipt = await downscaleImg(f); const p = document.getElementById("crcptprev"); p.src = courierReceipt; p.style.display = ""; nm.className = "muted small"; nm.textContent = "✓ receipt ready"; }
+    catch { nm.className = "small err"; nm.textContent = "couldn't read image"; }
   };
   // Delivery ↔ courier toggle (only rendered when the provider allows courier).
   let shipMode = document.getElementById("save")?.dataset.start === "courier" ? "courier" : "delivery";
@@ -338,7 +433,9 @@ async function orderDetail(id) {
   // Editable item list (photo/list-order reconciliation) — only at REQUESTED.
   if (editable) {
     const box = document.getElementById("edititems");
-    const recalcDraft = () => { const el = document.getElementById("draftTotal"); if (el) el.textContent = money(draftItems.reduce((s, it) => s + (it.price || 0) * it.qty, 0)); };
+    const recalcDraft = () => { const el = document.getElementById("draftTotal"); if (el) el.textContent = money(draftItems.reduce((s, it) => s + (it.price || 0) * it.qty, 0) + draftFee); };
+    const feeEl = document.getElementById("draftFee");
+    if (feeEl) feeEl.onchange = () => { draftFee = Math.round((parseFloat(feeEl.value) || 0) * 100); recalcDraft(); };
     const paint = () => {
       box.innerHTML = draftItems.length
         ? draftItems
@@ -372,8 +469,8 @@ async function orderDetail(id) {
       const imsg = document.getElementById("imsg");
       if (!draftItems.length) { if (imsg) { imsg.className = "small err"; imsg.textContent = "Add at least one item."; } return; }
       try {
-        // Persist the reconciled + priced item list, then quote/accept in one tap.
-        await api(`/api/admin/orders/${encodeURIComponent(id)}/items`, { method: "PATCH", body: { items: draftItems.map((i) => ({ name: i.name, qty: i.qty, price: i.price || 0 })) } });
+        // Persist the reconciled + priced item list (+ shipping fee), then quote/accept in one tap.
+        await api(`/api/admin/orders/${encodeURIComponent(id)}/items`, { method: "PATCH", body: { items: draftItems.map((i) => ({ name: i.name, qty: i.qty, price: i.price || 0 })), deliveryFee: draftFee } });
       } catch (e) {
         if (imsg) { imsg.className = "small err"; imsg.textContent = e.message === "not_editable" ? "Order already moved on." : e.message; }
         return;
@@ -386,11 +483,12 @@ async function orderDetail(id) {
   const save = document.getElementById("save");
   if (save) save.onclick = () => {
     if (save.dataset.forcedcourier === "1" || (save.dataset.courierable === "1" && shipMode === "courier")) {
-      const cn = document.getElementById("courierName")?.value.trim() || "";
       const ct = document.getElementById("courierTracking")?.value.trim() || "";
       const msg = document.getElementById("msg");
-      if (!cn) { if (msg) { msg.className = "err"; msg.textContent = "Enter the courier company."; } return; }
-      patch(save.dataset.next, "", "", { shipMode: "courier", courierName: cn, courierTracking: ct });
+      if (ct && !/^https?:\/\//i.test(ct)) { if (msg) { msg.className = "err"; msg.textContent = "Enter a valid link starting with http:// or https://"; } return; }
+      // Need at least one: a tracking link or a receipt photo (new or already on file).
+      if (!ct && courierReceipt === undefined && !order.courier_receipt) { if (msg) { msg.className = "err"; msg.textContent = "Add a tracking link or a receipt photo."; } return; }
+      patch(save.dataset.next, "", "", { shipMode: "courier", courierTracking: ct, ...(courierReceipt !== undefined ? { courierReceipt } : {}) });
       return;
     }
     if (save.dataset.onsite === "1") {
@@ -416,34 +514,119 @@ async function tabItems() {
   } catch (e) { content().innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
   const groups = {};
   catalog.forEach((c) => { const g = c.category || "Uncategorised"; (groups[g] = groups[g] || []).push(c); });
-  const rows = Object.keys(groups).sort().map((g) =>
+  const catKeys = Object.keys(groups).sort();
+  const rows = catKeys.map((g) =>
     `<div class="pick-cat">${esc(g)}</div>` + groups[g].map((c) => {
       const off = c.available === 0;
-      return `<div class="order-line${off ? " item-off" : ""}"><div><strong>${esc(c.name)}</strong> <span class="amt">${money(c.price)}</span>${off ? ` <span class="badge REJECTED">out of stock</span>` : ""}<br><span class="muted">${esc(c.unit || "")}</span></div>
+      return `<div class="order-line item-row${off ? " item-off" : ""}" data-name="${esc(c.name)}" data-cat="${esc(g)}"><div class="row" style="gap:10px;align-items:center;flex:1">${c.image ? `<img src="${c.image}" alt="" style="width:42px;height:42px;object-fit:cover;border-radius:8px;border:1px solid var(--border);flex:0 0 auto" />` : ""}<div><strong>${esc(c.name)}</strong> <span class="amt">${money(c.price)}</span>${off ? ` <span class="badge REJECTED">out of stock</span>` : ""}<br><span class="muted">${esc(c.unit || "")}</span></div></div>
        <div class="row grow0" style="gap:6px"><button class="ghost small avail" data-id="${c.id}" data-on="${off ? 0 : 1}">${off ? "Mark in stock" : "Mark out"}</button><button class="ghost small edit" data-id="${c.id}">Edit</button><button class="ghost small del" data-id="${c.id}" data-name="${esc(c.name)}">✕</button></div></div>`;
     }).join("")).join("");
-  content().innerHTML = `<div class="row" style="justify-content:space-between;align-items:center;margin-bottom:10px"><h2 style="margin:0">Items</h2><button class="small grow0" id="add">+ Add item</button></div>${rows || '<p class="muted">No items yet.</p>'}`;
+  // Category chips — same rule as the customer's order form: a lone category is
+  // no choice at all, so don't take up a row for it.
+  const chipsHtml = catKeys.length > 1
+    ? `<div class="chips" id="itemchips"><button type="button" class="chip active" data-c="__all__">All</button>` +
+      catKeys.map((g) => `<button type="button" class="chip" data-c="${esc(g)}">${esc(g)}</button>`).join("") + `</div>`
+    : "";
+  content().innerHTML = `<div class="row" style="justify-content:space-between;align-items:center;margin-bottom:10px"><h2 style="margin:0">Items</h2><button class="small grow0" id="add">+ Add item</button></div>` +
+    (catalog.length ? `${chipsHtml}<input id="itemsearch" placeholder="Search items…" style="margin-bottom:10px" /><p id="itemcount" class="muted small" style="margin:0 0 8px"></p>` : "") +
+    (rows || '<p class="muted">No items yet.</p>');
   document.getElementById("add").onclick = () => itemModal(null, categories, catalog);
+  wireItemFilter();
   content().querySelectorAll(".edit").forEach((b) => (b.onclick = () => itemModal(catalog.find((c) => c.id === b.dataset.id), categories, catalog)));
   content().querySelectorAll(".avail").forEach((b) => (b.onclick = async () => { await api(`/api/console/providers/${pid()}/catalog/${b.dataset.id}`, { method: "PATCH", body: { available: b.dataset.on === "0" } }); tabItems(); }));
   content().querySelectorAll(".del").forEach((b) => (b.onclick = async () => { if (!confirm(`Delete "${b.dataset.name}"?`)) return; await api(`/api/console/providers/${pid()}/catalog/${b.dataset.id}`, { method: "DELETE" }); tabItems(); }));
 }
+// Category chips + search, combined, over the Items tab's rows. Mirrors the
+// customer order form's filter so the two read the same way. Hides a category
+// heading once everything under it is filtered out, and says so when nothing matches.
+function wireItemFilter() {
+  const box = content();
+  const search = box.querySelector("#itemsearch");
+  if (!search) return; // no catalog yet
+  const count = box.querySelector("#itemcount");
+  let activeCat = "__all__";
+  const apply = () => {
+    const q = search.value.trim().toLowerCase();
+    let shown = 0;
+    box.querySelectorAll(".item-row").forEach((r) => {
+      const catOk = activeCat === "__all__" || r.dataset.cat === activeCat;
+      const nameOk = !q || r.dataset.name.toLowerCase().includes(q);
+      const on = catOk && nameOk;
+      r.style.display = on ? "" : "none";
+      if (on) shown++;
+    });
+    box.querySelectorAll(".pick-cat").forEach((hd) => {
+      let sib = hd.nextElementSibling, any = false;
+      while (sib && sib.classList.contains("item-row")) { if (sib.style.display !== "none") any = true; sib = sib.nextElementSibling; }
+      hd.style.display = any ? "" : "none";
+    });
+    const total = box.querySelectorAll(".item-row").length;
+    count.textContent = shown === total ? `${total} item${total === 1 ? "" : "s"}` : shown ? `${shown} of ${total} items` : "No items match.";
+  };
+  search.oninput = apply;
+  box.querySelectorAll("#itemchips .chip").forEach((ch) => {
+    ch.onclick = () => {
+      activeCat = ch.dataset.c;
+      box.querySelectorAll("#itemchips .chip").forEach((x) => x.classList.toggle("active", x === ch));
+      apply();
+    };
+  });
+  apply();
+}
+
+// Downscale an uploaded photo before saving — smaller for D1 storage + fast pages.
+const downscaleImg = (file) => new Promise((resolve, reject) => {
+  const rd = new FileReader();
+  rd.onerror = reject;
+  rd.onload = () => {
+    const img = new Image();
+    img.onerror = reject;
+    img.onload = () => {
+      const max = 800, scale = Math.min(1, max / Math.max(img.width, img.height));
+      const cv = document.createElement("canvas");
+      cv.width = Math.round(img.width * scale); cv.height = Math.round(img.height * scale);
+      cv.getContext("2d").drawImage(img, 0, 0, cv.width, cv.height);
+      resolve(cv.toDataURL("image/jpeg", 0.7));
+    };
+    img.src = rd.result;
+  };
+  rd.readAsDataURL(file);
+});
+
 function itemModal(item, categories, catalog) {
   const catOpts = categories.map((c) => `<option ${item && item.category === c.name ? "selected" : ""}>${esc(c.name)}</option>`).join("") + `<option value="__new__">+ New category…</option>`;
+  let newImg; // set when the admin picks a new photo; undefined = leave as-is
   openModal(item ? "Edit item" : "Add item", `
     <label>Name</label><input id="m_name" value="${item ? esc(item.name) : ""}" />
     <label style="margin-top:8px">Category</label><select id="m_cat">${catOpts}</select>
     <input id="m_newcat" style="display:none;margin-top:6px" placeholder="New category name" />
     <label style="margin-top:8px">Unit</label><select id="m_unit"><option ${item && item.unit === "piece" ? "selected" : ""}>piece</option><option ${item && item.unit === "kg" ? "selected" : ""}>kg</option></select>
     <label style="margin-top:8px">Price (₹)</label><input id="m_price" type="number" min="0" step="0.01" value="${item ? (item.price / 100) : ""}" />
+    <label style="margin-top:8px">Description <span class="muted small">— shown to customers</span></label>
+    <textarea id="m_desc" rows="2" placeholder="e.g. Deep cleanses pores & controls oil">${item && item.description ? esc(item.description) : ""}</textarea>
+    <label style="margin-top:8px">Photo</label>
+    <div class="row" style="gap:8px;align-items:center">
+      <img id="m_imgprev" src="${item && item.image ? item.image : ""}" alt="" style="width:52px;height:52px;object-fit:cover;border-radius:8px;border:1px solid var(--border);${item && item.image ? "" : "display:none"}" />
+      <label class="ghost small grow0" style="cursor:pointer;margin:0">📷 ${item && item.image ? "Change photo" : "Add photo"}<input type="file" id="m_img" accept="image/*" hidden /></label>
+      ${item && item.image ? `<button type="button" class="ghost small grow0" id="m_imgclear">Remove</button>` : ""}
+      <span id="m_imgname" class="muted small"></span>
+    </div>
     <button id="m_save" style="margin-top:14px">${item ? "Save" : "Add"}</button><p id="m_msg"></p>`);
   const sel = document.getElementById("m_cat"), ni = document.getElementById("m_newcat");
   sel.onchange = () => { ni.style.display = sel.value === "__new__" ? "block" : "none"; };
+  const prev = document.getElementById("m_imgprev"), imgName = document.getElementById("m_imgname");
+  document.getElementById("m_img").onchange = async (e) => {
+    const f = e.target.files?.[0]; if (!f) return;
+    try { newImg = await downscaleImg(f); prev.src = newImg; prev.style.display = ""; imgName.textContent = "✓ photo ready"; }
+    catch { imgName.className = "small err"; imgName.textContent = "couldn't read image"; }
+  };
+  document.getElementById("m_imgclear")?.addEventListener("click", () => { newImg = null; prev.style.display = "none"; imgName.textContent = "photo will be removed"; });
   document.getElementById("m_save").onclick = async () => {
     const msg = document.getElementById("m_msg");
     const category = sel.value === "__new__" ? ni.value.trim() : sel.value;
     const paise = Math.round((parseFloat(document.getElementById("m_price").value) || 0) * 100);
-    const body = { name: document.getElementById("m_name").value, category, unit: document.getElementById("m_unit").value, price: paise };
+    const body = { name: document.getElementById("m_name").value, category, unit: document.getElementById("m_unit").value, price: paise, description: document.getElementById("m_desc").value };
+    if (newImg !== undefined) body.image = newImg; // only send when picked/removed
     if (!body.name.trim()) { msg.className = "err"; msg.textContent = "Name required."; return; }
     try {
       if (item) await api(`/api/console/providers/${pid()}/catalog/${item.id}`, { method: "PATCH", body });

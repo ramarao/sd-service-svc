@@ -2,7 +2,8 @@
 // flow.js and are driven by the app's `flow` config (see config.js); this module
 // stays vertical-agnostic by passing `flow` through to those helpers.
 import { randomId } from "./crypto.js";
-import { notifyCustomer } from "./wa.js";
+import { notifyCustomer, sendWhatsApp, sendWhatsAppImage, ctaUrlPayload, formatMoney, safeConfig } from "./wa.js";
+import { mintLinkToken } from "./session.js";
 import { canTransition, notifyStatuses, assignmentAt, advanceStep } from "./flow.js";
 import { flowForProvider } from "./flows/index.js";
 
@@ -103,6 +104,24 @@ export async function listVerticals(db) {
     return []; // table absent (single-vertical legacy D1)
   }
 }
+// The town's ONLY shop, or null when it has none/several. A one-shop town has no
+// marketplace to browse, so the webhook links straight to that shop's order form
+// instead of routing through a chooser the SPA would just skip anyway.
+// Mirrors the chooser's own filtering: providers in an ACTIVE vertical.
+export async function soleProvider(db) {
+  try {
+    const { results } = await db
+      .prepare(
+        "SELECT sp.* FROM service_providers sp JOIN verticals v ON v.slug = sp.vertical " +
+          "WHERE v.active = 1 LIMIT 2"
+      )
+      .all();
+    return (results || []).length === 1 ? results[0] : null;
+  } catch {
+    return null; // verticals table absent (legacy D1) → fall back to the chooser
+  }
+}
+
 export async function listProvidersByVertical(db, slug) {
   try {
     const { results } = await db
@@ -343,17 +362,30 @@ export async function listCaptainJobs(db, flow, phone, providerId) {
 }
 
 // ── Orders ───────────────────────────────────────────────────────────────────
-export async function createOrder(db, { providerId, customerId, address, lat, lng, addressId, customerName, customerPhone, contactName, contactPhone, items, note, images }) {
+// Which payment method THIS order runs on, resolved once at creation.
+// A courier-flow shop is prepaid UPI by definition (the parcel is gone before the
+// customer could ever pay cash). Otherwise the provider's setting rules, and
+// 'both' defers to the customer's pick — falling back to COD if they sent junk.
+export function resolvePaymentMethod(provider, chosen) {
+  if (flowForProvider(provider)?.prepaid) return "upi";
+  const setting = provider?.payment_method || "cod";
+  if (setting !== "both") return setting === "upi" ? "upi" : "cod";
+  return chosen === "upi" ? "upi" : "cod";
+}
+
+export async function createOrder(db, { providerId, customerId, address, lat, lng, addressId, customerName, customerPhone, contactName, contactPhone, items, note, images, paymentMethod }) {
   const ts = now();
-  const code = await ensureProviderCode(db, await getProvider(db, providerId));
+  const provider = await getProvider(db, providerId);
+  const code = await ensureProviderCode(db, provider);
   const id = await nextOrderId(db, ts, code);
   const latN = Number.isFinite(+lat) ? +lat : null;
   const lngN = Number.isFinite(+lng) ? +lng : null;
+  const payMethod = resolvePaymentMethod(provider, paymentMethod);
   await db
     .prepare(
-      "INSERT INTO orders (id, provider_id, customer_id, status, address, lat, lng, address_id, customer_name, customer_phone, contact_name, contact_phone, note, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+      "INSERT INTO orders (id, provider_id, customer_id, status, address, lat, lng, address_id, customer_name, customer_phone, contact_name, contact_phone, note, payment_method, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
     )
-    .bind(id, providerId, customerId, "REQUESTED", address || null, latN, lngN, addressId || null, customerName || null, customerPhone || null, contactName || null, contactPhone || null, note || null, ts, ts)
+    .bind(id, providerId, customerId, "REQUESTED", address || null, latN, lngN, addressId || null, customerName || null, customerPhone || null, contactName || null, contactPhone || null, note || null, payMethod, ts, ts)
     .run();
 
   // Resolve unit prices from the provider's catalog (authoritative — never trust
@@ -441,8 +473,9 @@ export async function getOrder(db, id) {
     images = r.results || [];
   } catch { /* table absent on legacy D1 */ }
   const assignees = await orderAssignees(db, id);
-  const total = (items || []).reduce((s, it) => s + it.qty * (it.unit_price || 0), 0);
-  return { ...order, items, events, images, assignees, total };
+  const items_total = (items || []).reduce((s, it) => s + it.qty * (it.unit_price || 0), 0);
+  const fee = order.delivery_fee || 0; // shop-set courier/delivery charge
+  return { ...order, items, events, images, assignees, items_total, delivery_fee: fee, total: items_total + fee };
 }
 
 // Captains assigned to an order (on-site jobs may have several). Tolerates the
@@ -458,13 +491,27 @@ export async function orderAssignees(db, orderId) {
 
 // Advance/transition status, write an event, and notify the customer. The flow
 // is resolved from the order's provider → its vertical. Returns { order } or throws.
-export async function transitionOrder(env, db, { orderId, toStatus, actor, agentName, captainPhone, shipMode, courierName, courierTracking, assignees }) {
+export async function transitionOrder(env, db, { orderId, toStatus, actor, agentName, captainPhone, shipMode, courierName, courierTracking, courierReceipt, assignees }) {
   const order = await db.prepare("SELECT * FROM orders WHERE id = ?").bind(orderId).first();
   if (!order) throw new Error("not_found");
   const provider = await getProvider(db, order.provider_id);
   const flow = flowForProvider(provider);
 
   if (!canTransition(flow, order.status, toStatus)) throw new Error("invalid_transition");
+
+  // Payment gate: a UPI order can't move past the accept step until the shop has
+  // confirmed the customer's payment. Rejecting is always allowed (that's the way
+  // out of an unpaid order). Flow-agnostic — every flow declares decision.accept.
+  const dec = flow.decision;
+  if (
+    dec &&
+    order.status === dec.accept &&
+    toStatus !== dec.reject &&
+    order.payment_method === "upi" &&
+    order.payment_status !== "paid"
+  ) {
+    throw new Error("payment_not_confirmed");
+  }
 
   const ts = now();
   // Courier dispatch: instead of assigning a field agent, record the courier +
@@ -491,9 +538,10 @@ export async function transitionOrder(env, db, { orderId, toStatus, actor, agent
         "agent_name = COALESCE(?, agent_name), captain_phone = COALESCE(?, captain_phone), " +
         "delivery_captain_name = COALESCE(?, delivery_captain_name), delivery_captain_phone = COALESCE(?, delivery_captain_phone), " +
         "ship_mode = COALESCE(?, ship_mode), courier_name = COALESCE(?, courier_name), courier_tracking = COALESCE(?, courier_tracking), " +
+        "courier_receipt = COALESCE(?, courier_receipt), " +
         "updated_at = ? WHERE id = ?"
     )
-    .bind(toStatus, primaryName, primaryPhone, delivName, delivPhone, shipModeVal, courier ? (courierName || null) : null, courier ? (courierTracking || null) : null, ts, orderId)
+    .bind(toStatus, primaryName, primaryPhone, delivName, delivPhone, shipModeVal, courier ? (courierName || null) : null, courier ? (courierTracking || null) : null, courier ? (courierReceipt || null) : null, ts, orderId)
     .run();
   // Replace the assignee list when a multi-captain assignment was made.
   if (multi) {
@@ -511,10 +559,74 @@ export async function transitionOrder(env, db, { orderId, toStatus, actor, agent
     const customer = await getCustomer(db, order.customer_id);
     if (provider && customer) {
       const waCfg = await getWaConfig(env, db, provider);
+      // One-tap link that signs them in and opens THIS order, so every status
+      // message is actionable. Needs PUBLIC_HOST to build an absolute URL; without
+      // it the message still sends, just without the button.
+      let orderLink = null;
+      const host = env.PUBLIC_HOST;
+      if (host) {
+        try {
+          const t = await mintLinkToken(env, {
+            cid: customer.id,
+            ph: customer.wa_phone,
+            slug: provider.slug,
+            oid: orderId,
+          });
+          orderLink = `https://${host}/auth/wa/${t}`;
+        } catch (e) {
+          console.error("[notify] link mint failed", e);
+        }
+      }
+      // A courier shipment with an uploaded receipt → show that receipt as the
+      // message header. WhatsApp fetches header images by URL, so we hand it a
+      // public, order-scoped, short-lived token URL (not the stored data URL).
+      let headerImage = null;
+      if (host && full.ship_mode === "courier" && full.courier_receipt) {
+        try {
+          const rt = await mintLinkToken(env, { oimg: orderId });
+          headerImage = `https://${host}/api/my/orders/${encodeURIComponent(orderId)}/courier-receipt?t=${rt}`;
+        } catch (e) {
+          console.error("[notify] receipt image token", e);
+        }
+      }
       // Fire-and-log; a WhatsApp failure must not roll back the status change.
-      await notifyCustomer(waCfg, { flow, provider, customer, status: toStatus, order: full }).catch((e) =>
+      await notifyCustomer(waCfg, { flow, provider, customer, status: toStatus, order: full, orderLink, headerImage }).catch((e) =>
         console.error("[notify] failed", e)
       );
+
+      // When a UPI order is accepted (→ payment due), also push the pay QR as a
+      // chat IMAGE. A WhatsApp image saves to the gallery natively, so same-phone
+      // customers can scan-from-gallery even inside an in-app browser that can't
+      // save from a web page. Only at the accept step, only for payable UPI orders.
+      const payableNow =
+        toStatus === flow.decision?.accept &&
+        full.payment_method === "upi" &&
+        full.total > 0 &&
+        provider.upi_id &&
+        full.payment_status !== "paid";
+      if (payableNow && host) {
+        try {
+          const t = await mintLinkToken(env, { qr: orderId }); // public, order-scoped, short-lived
+          const link = `https://${host}/api/my/orders/${encodeURIComponent(orderId)}/qr.png?t=${t}`;
+          const amount = formatMoney(full.total, safeConfig(provider.config).currency);
+          const caption =
+            `Pay ${amount} for order ${orderId} 💳\n` +
+            `Save this QR to your gallery, then open any UPI app (GPay/PhonePe/Paytm) → *Scan from gallery* → pay.\n` +
+            `After paying, upload your receipt so we can confirm and start it.`;
+          // Carry the QR as an interactive message's image HEADER so the same
+          // message also gets an "Open order" button (→ pay + upload receipt).
+          // Falls back to a plain image if we couldn't mint the order link.
+          const payload = orderLink
+            ? ctaUrlPayload(caption, "Open order", orderLink, link)
+            : { type: "image", image: { link, caption } };
+          await sendWhatsApp(waCfg, customer.wa_phone, payload);
+          // Stamp when we asked for payment — a receipt's payment date must be
+          // AFTER this to auto-confirm (stops an old/reused receipt from matching).
+          await db.prepare("UPDATE orders SET payment_requested_at = ? WHERE id = ?").bind(ts, orderId).run();
+        } catch (e) {
+          console.error("[notify] qr image send failed", e);
+        }
+      }
     }
   }
   return full;

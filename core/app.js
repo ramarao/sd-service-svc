@@ -10,7 +10,8 @@ import { Hono } from "hono";
 import { setCookie, deleteCookie, getCookie } from "hono/cookie";
 import QRCode from "qrcode";
 import { processPaymentEmail } from "./email.js";
-import { extractItemsFromImage } from "./vision.js";
+import { extractItemsFromImage, extractReceipt } from "./vision.js";
+import { qrPng } from "./qrpng.js";
 import { notifyOrders } from "./orders-hub.js";
 import { allowedTransitions, advanceStep, itemsEditableAt } from "./flow.js";
 import { FLOWS, flowForProvider, flowForVertical, setDefaultVertical } from "./flows/index.js";
@@ -28,11 +29,14 @@ import {
 import {
   verifySignature,
   sendWhatsApp,
+  sendTypingIndicator,
+  fetchWhatsAppMedia,
   textPayload,
   ctaUrlPayload,
   templatePayload,
   withinWindow,
   safeConfig,
+  formatMoney,
 } from "./wa.js";
 import {
   now,
@@ -70,6 +74,7 @@ import {
   managerName,
   listVerticals,
   listProvidersByVertical,
+  soleProvider,
 } from "./db.js";
 import { olaSuggest, olaReverse, olaConfigured } from "./ola.js";
 
@@ -154,8 +159,24 @@ async function handleWebhook(env, body) {
 
   const host = env.PUBLIC_HOST || CONFIG?.brand?.host || "dhobi-demo.manasanta.in";
   const townName = CONFIG?.brand?.name || provider?.name || "us";
+  const logo = CONFIG?.brand?.logo || null; // optional image header on CTA buttons
   const waCfg = await getWaConfig(env, env.DB, provider); // null provider → platform creds
+  // Show "typing…" (and mark the message read) the moment anything lands, before
+  // we work out the reply — every branch below benefits. Best-effort; never blocks
+  // the reply. Awaited so the Worker doesn't drop the request when handleWebhook
+  // returns, but its own failures are swallowed inside the helper.
+  await sendTypingIndicator(waCfg, msg.id);
   const text = (msg.text?.body || "").trim();
+
+  // An image (or image sent as a document) from a customer who has an order
+  // awaiting payment → treat it as a payment receipt: OCR it, match it, and
+  // auto-confirm when everything lines up. Handled before the keyword branches
+  // since a receipt carries no text command.
+  if (msg.type === "image" || (msg.type === "document" && /^image\//.test(msg.document?.mime_type || ""))) {
+    const mediaId = msg.image?.id || msg.document?.id;
+    await handleReceiptImage(env, waCfg, customer, mediaId, host).catch((e) => console.error("[receipt]", e));
+    return;
+  }
 
   // Captain login: a captain texts "capt" or "captain" → reply with a one-tap
   // sign-in link carrying a signed token for their verified number. Tapping it
@@ -168,7 +189,7 @@ async function handleWebhook(env, body) {
       const t = await mintLinkToken(env, { cap: 1, ph: from });
       const link = `https://${host}/auth/captain/wa/${t}`;
       const name = await captainName(env.DB, from);
-      await sendWhatsApp(waCfg, from, ctaUrlPayload(`Hi${name ? " " + name : ""}! Tap below to open your ${term} app — you'll be signed in automatically.`, `Open ${term} app`, link));
+      await sendWhatsApp(waCfg, from, ctaUrlPayload(`Hi${name ? " " + name : ""}! Tap below to open your ${term} app — you'll be signed in automatically.`, `Open ${term} app`, link, logo));
     } else {
       await sendWhatsApp(
         waCfg,
@@ -191,7 +212,7 @@ async function handleWebhook(env, body) {
       const t = await mintLinkToken(env, { mgr: 1, ph: from });
       const link = `https://${host}/auth/manager/wa/${t}`;
       const name = await managerName(env.DB, from);
-      await sendWhatsApp(waCfg, from, ctaUrlPayload(`Hi${name ? " " + name : ""}! Tap below to open your admin app — you'll be signed in automatically.`, "Open admin app", link));
+      await sendWhatsApp(waCfg, from, ctaUrlPayload(`Hi${name ? " " + name : ""}! Tap below to open your admin app — you'll be signed in automatically.`, "Open admin app", link, logo));
     } else {
       await sendWhatsApp(
         waCfg,
@@ -208,17 +229,178 @@ async function handleWebhook(env, body) {
   // white-label (this number belongs to one provider) goes straight to that
   // provider's order form; a town number opens the marketplace chooser (/start).
   const hi = customer.name ? " " + customer.name : "";
-  if (provider) {
-    const t = await mintLinkToken(env, { cid: customer.id, ph: from, slug: provider.slug });
+  // A town with exactly one shop has nothing to browse — treat it like the
+  // white-label case and link straight to that shop's order form.
+  const only = provider || (await soleProvider(env.DB));
+  if (only) {
+    const t = await mintLinkToken(env, { cid: customer.id, ph: from, slug: only.slug });
     const link = `https://${host}/auth/wa/${t}`;
-    const bodyText = `Hi${hi}! Tap below to place your ${provider.name} order — you'll be signed in automatically, no login needed.`;
-    await sendWhatsApp(waCfg, from, ctaUrlPayload(bodyText, "Place order", link));
+    const bodyText = `Hi${hi}! Tap below to place your ${only.name} order — you'll be signed in automatically, no login needed.`;
+    await sendWhatsApp(waCfg, from, ctaUrlPayload(bodyText, "Place order", link, logo));
   } else {
     const t = await mintLinkToken(env, { cid: customer.id, ph: from }); // no slug → chooser
     const link = `https://${host}/auth/wa/${t}`;
     const bodyText = `Hi${hi}! Welcome to *${townName}*. Tap below to browse services and place an order — you'll be signed in automatically.`;
-    await sendWhatsApp(waCfg, from, ctaUrlPayload(bodyText, "Browse services", link));
+    await sendWhatsApp(waCfg, from, ctaUrlPayload(bodyText, "Browse services", link, logo));
   }
+}
+
+// ── New-order alert to the shop ──────────────────────────────────────────────
+// Ping every active admin/manager of the provider with a one-tap CTA that signs
+// them in and opens THAT order.
+//
+// Caveat: free-form WhatsApp (text OR interactive) only reaches a number inside
+// ITS OWN 24h window — Meta rejects it otherwise. A manager who hasn't messaged
+// the number in a day is therefore unreachable this way, so we skip them rather
+// than fire a send we know bounces. Reaching a quiet manager needs an approved
+// Utility template with a URL button (Meta-side approval).
+async function notifyManagersNewOrder(env, provider, order) {
+  const managers = await listManagers(env.DB, provider.id);
+  if (!managers.length) return;
+  const host = env.PUBLIC_HOST || CONFIG?.brand?.host || "dhobi-demo.manasanta.in";
+  const logo = CONFIG?.brand?.logo || null;
+  const waCfg = await getWaConfig(env, env.DB, provider);
+  const cfg = safeConfig(provider.config);
+  const items = order.items || [];
+  const lines = items.slice(0, 5).map((i) => `• ${i.name} × ${i.qty}`).join("\n");
+  const more = items.length > 5 ? `\n…and ${items.length - 5} more` : "";
+  const amount = order.total ? `\nTotal: ${formatMoney(order.total, cfg.currency)}` : "";
+  const who = order.customer_name || order.customer_phone || "A customer";
+  const bodyText =
+    `🛎️ *New order* — ${provider.name}\nOrder ${order.id}\nFrom: ${who}${amount}` +
+    (lines ? `\n\n${lines}${more}` : "");
+
+  await Promise.all(
+    managers.map(async (m) => {
+      if (!m.phone) return;
+      const cust = await getCustomerByPhone(env.DB, m.phone).catch(() => null);
+      if (!withinWindow(cust?.last_inbound_at)) {
+        console.warn("[wa] new-order alert skipped (outside 24h window)", provider.slug, m.phone);
+        return;
+      }
+      const t = await mintLinkToken(env, { mgr: 1, ph: m.phone, oid: order.id, pid: provider.id });
+      const link = `https://${host}/auth/manager/wa/${t}`;
+      await sendWhatsApp(waCfg, m.phone, ctaUrlPayload(bodyText, "Open order", link, logo));
+    })
+  );
+}
+
+// Decide which pending order a receipt is for, and whether it may auto-confirm.
+// Pure (no I/O) so the money-critical logic is unit-testable. Auto-confirm demands
+// ALL of: a pinned order (by order-note or a unique amount match), the exact
+// amount, a readable payment time at/after the QR was sent (2-min skew grace),
+// and a non-failed receipt. Anything less → target set for review, autoConfirm false.
+export function matchReceipt(read, pending, graceMs = 120_000) {
+  const refUp = (read?.orderRef || "").toUpperCase().replace(/[^A-Z0-9-]/g, "");
+  const byAmount = read?.ok && read.amount != null ? pending.filter((o) => o.total === read.amount) : [];
+  // `order` = the one we'd auto-confirm. A note that names an order id trumps
+  // amount — but if that named order ISN'T one of this customer's pending orders,
+  // we do NOT silently auto-confirm a different order by amount; that's suspicious.
+  let order = null;
+  if (refUp) order = pending.find((o) => o.id.toUpperCase() === refUp) || null;
+  else if (byAmount.length === 1) order = byAmount[0];
+  // Target for review/storage: the auto order, else a unique amount match, else newest.
+  const target = order || (byAmount.length === 1 ? byAmount[0] : pending[0]);
+  const paidTs = read?.paidAtISO ? Date.parse(read.paidAtISO) : NaN;
+  const amountOk = !!read?.ok && read.amount != null && read.amount === target.total;
+  const dateOk = Number.isFinite(paidTs) && paidTs >= (target.payment_requested_at - graceMs);
+  const notFailed = read?.status !== "failed";
+  const autoConfirm = !!order && amountOk && dateOk && notFailed;
+
+  const reasons = [];
+  if (!order) reasons.push("couldn't pin it to one order");
+  if (!amountOk) reasons.push(read?.amount == null ? "amount unreadable" : `amount ₹${(read.amount / 100).toFixed(2)} ≠ order ₹${(target.total / 100).toFixed(2)}`);
+  if (!dateOk) reasons.push(Number.isFinite(paidTs) ? "payment dated before the request" : "payment date unreadable");
+  if (!notFailed) reasons.push("receipt shows a failed/pending payment");
+  return { target, order, autoConfirm, reasons };
+}
+
+// Tell the customer their payment is confirmed — same message whether an admin
+// clicked Confirm or the AI auto-matched a WhatsApp receipt. Best-effort (a WA
+// failure must not undo the confirmed payment). `order` must carry the computed
+// `total` (from getOrder).
+async function notifyPaymentConfirmed(env, order) {
+  try {
+    const provider = await getProvider(env.DB, order.provider_id);
+    const customer = await getCustomer(env.DB, order.customer_id);
+    if (!provider || !customer?.wa_phone) return;
+    const waCfg = await getWaConfig(env, env.DB, provider);
+    const amt = order.payment_amount || order.total || 0;
+    await sendWhatsApp(waCfg, customer.wa_phone, textPayload(
+      `✅ Payment of ${formatMoney(amt, safeConfig(provider.config).currency)} for order ${order.id} confirmed. ` +
+      `Thank you — we're starting your order now!`
+    ));
+  } catch (e) {
+    console.error("[notify] payment confirmed", e);
+  }
+}
+
+// ── WhatsApp-received payment receipt ────────────────────────────────────────
+// A customer sent an image while they have an order awaiting payment. Download it,
+// OCR it, and reconcile: full match (right order, right amount, paid AFTER we sent
+// the QR) → auto-mark PAID; anything short of that → save it as 'submitted' for the
+// shop to eyeball. Either way the receipt is stored on the order and shown in the
+// admin's payment-review card. A screenshot can be faked, so only a full match
+// auto-confirms — everything else stays a human decision.
+async function handleReceiptImage(env, waCfg, customer, mediaId, host) {
+  // Orders this customer has been asked to pay for and hasn't (QR was sent).
+  const { results: pending } = await env.DB.prepare(
+    "SELECT o.id, o.provider_id, o.status, o.payment_status, o.payment_requested_at, " +
+      "(SELECT COALESCE(SUM(qty*unit_price),0) FROM order_items WHERE order_id = o.id) + COALESCE(o.delivery_fee,0) AS total " +
+      "FROM orders o WHERE o.customer_id = ? AND o.payment_method = 'upi' " +
+      "AND o.payment_requested_at IS NOT NULL AND COALESCE(o.payment_status,'') != 'paid' " +
+      "ORDER BY o.payment_requested_at DESC"
+  ).bind(customer.id).all();
+
+  if (!pending?.length) {
+    // No open payment → don't guess it's a receipt; a gentle nudge, no state change.
+    await sendWhatsApp(waCfg, customer.wa_phone, textPayload(
+      "Thanks! We don't see a payment waiting on your account right now. If you just paid for an order, open it from the order link and upload the receipt there."
+    ));
+    return;
+  }
+
+  const image = await fetchWhatsAppMedia(waCfg, mediaId);
+  if (!image) {
+    await sendWhatsApp(waCfg, customer.wa_phone, textPayload(
+      "We couldn't read that image. Please resend a clear screenshot of your payment, or upload it on your order page."
+    ));
+    return;
+  }
+
+  const read = await extractReceipt(env, env.DB, image).catch(() => ({ ok: false }));
+  const { target, order, autoConfirm, reasons } = matchReceipt(read, pending);
+
+  const paidTs = read.paidAtISO ? Date.parse(read.paidAtISO) : NaN;
+  const extracted = {
+    ...read,
+    source: "whatsapp",
+    expected: target.total,
+    mismatch: read.amount != null && read.amount !== target.total,
+    autoConfirmed: autoConfirm,
+    reasons,
+  };
+  const ts = now();
+
+  if (autoConfirm) {
+    await env.DB.prepare(
+      "UPDATE orders SET payment_receipt = ?, payment_receipt_at = ?, payment_extracted = ?, " +
+        "payment_status = 'paid', payment_amount = ?, payment_ref = ?, payment_payer = ?, payment_at = ?, updated_at = ? WHERE id = ?"
+    ).bind(image, ts, JSON.stringify(extracted), target.total, (read.ref || "UPI").slice(0, 64), (read.payer || null)?.slice(0, 120) || null, ts, ts, target.id).run();
+    await notifyOrders(env, target.provider_id);
+    // Same "payment confirmed" message the admin-confirm path sends.
+    await notifyPaymentConfirmed(env, await getOrder(env.DB, target.id));
+    return;
+  }
+
+  // Not a clean match → keep it for the shop to review, don't touch paid state.
+  await env.DB.prepare(
+    "UPDATE orders SET payment_receipt = ?, payment_receipt_at = ?, payment_extracted = ?, payment_status = 'submitted', updated_at = ? WHERE id = ?"
+  ).bind(image, ts, JSON.stringify(extracted), ts, target.id).run();
+  await notifyOrders(env, target.provider_id);
+  await sendWhatsApp(waCfg, customer.wa_phone, textPayload(
+    `Thanks! We've received your receipt for order ${target.id}. The shop will verify it and confirm shortly.`
+  ));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -346,7 +528,13 @@ app.get("/auth/manager/wa/:token", async (c) => {
   const name = await managerName(c.env.DB, claims.ph);
   const token = await issueSession(c.env, { role: "manager", phone: claims.ph, name });
   setCookie(c, COOKIE_NAME, token, sessionCookieOpts);
-  return c.redirect("/manager");
+  // A new-order alert carries the order to open — deep-link to it, but only if
+  // they still run that provider (they may have been removed since the alert).
+  const deep =
+    claims.oid && claims.pid && providers.some((p) => p.id === claims.pid)
+      ? `/manager?order=${encodeURIComponent(claims.oid)}&provider=${encodeURIComponent(claims.pid)}`
+      : "/manager";
+  return c.redirect(deep);
 });
 
 app.get("/auth/manager/wa-login/info", async (c) => {
@@ -521,12 +709,7 @@ app.get("/api/captain/orders/:id/payment", requireRole("captain"), async (c) => 
   if (!provider?.upi_id) return c.json({ hasUpi: false, ...pay });
   const amount = (Number(order.total || 0) / 100).toFixed(2);
   const payee = provider.upi_name || provider.name;
-  // tr = transaction reference (the merchant's order ref — PSPs track/report this,
-  // unlike the free-text tn note). Carries our order id so payment emails/reports
-  // can be matched back exactly.
-  const upi =
-    `upi://pay?pa=${encodeURIComponent(provider.upi_id)}&pn=${encodeURIComponent(payee)}` +
-    `&am=${amount}&cu=INR&tr=${encodeURIComponent(order.id)}&tn=${encodeURIComponent("Order " + order.id)}`;
+  const upi = upiString(provider, order);
   const svg = await QRCode.toString(upi, { type: "svg", margin: 1, errorCorrectionLevel: "M" });
   return c.json({ hasUpi: true, upi_id: provider.upi_id, upi_name: payee, amount, upi, svg, ...pay });
 });
@@ -579,9 +762,13 @@ app.get("/auth/wa/:token", async (c) => {
     wa_phone: claims.ph,
   });
   setCookie(c, COOKIE_NAME, session, sessionCookieOpts);
-  // A slug → straight to that provider's order form (white-label); no slug → the
-  // marketplace chooser (town), where the customer picks a vertical then a provider.
-  return c.redirect(claims.slug ? `/${claims.slug}/app` : "/start");
+  // An order status message deep-links to that order; a slug → straight to that
+  // provider's order form (white-label); no slug → the marketplace chooser (town),
+  // where the customer picks a vertical then a provider.
+  if (claims.slug && claims.oid) {
+    return c.redirect(`/${encodeURIComponent(claims.slug)}/app?order=${encodeURIComponent(claims.oid)}`);
+  }
+  return c.redirect(claims.slug ? `/${encodeURIComponent(claims.slug)}/app` : "/start");
 });
 
 // Who am I (drives client-side dashboard rendering).
@@ -605,6 +792,11 @@ app.get("/api/providers/:slug", async (c) => {
     .bind(provider.id)
     .all();
   const cfg = safeConfig(provider.config);
+  // Ordering happens over WhatsApp, so a logged-out visitor's only real CTA is a
+  // wa.me link. "hi" is the keyword the webhook answers with a sign-in button.
+  const s = await getSettings(c.env.DB);
+  const waNumber = (s?.wa_display_number || "").replace(/[^\d]/g, "");
+  const waLink = waNumber ? `https://wa.me/${waNumber}?text=${encodeURIComponent("hi")}` : null;
   return c.json({
     id: provider.id,
     slug: provider.slug,
@@ -612,8 +804,17 @@ app.get("/api/providers/:slug", async (c) => {
     vertical: provider.vertical || null,
     currency: cfg.currency || "INR",
     photo_order: provider.photo_order ? 1 : 0, // 1 = customer may upload a photo/list to auto-fill items
+    // How this shop takes money: 'upi' | 'cod' | 'both' ('both' → the order form
+    // offers the customer a choice). A courier (prepaid) shop is always 'upi'.
+    payment_method: flowForProvider(provider)?.prepaid ? "upi" : provider.payment_method || "cod",
+    has_upi: !!provider.upi_id, // a UPI shop with no VPA can't actually be paid
     catalog,
     flow: flowForProvider(provider), // the vertical's flow — drives status labels/tracking
+    // Marketing copy for the shop's public landing page (tagline, blurb, feature
+    // strip, collection order + swatch colours, about, contact). Per-provider data,
+    // so no shop's branding is baked into core. Absent → no landing, just the app.
+    landing: cfg.landing || null,
+    wa: waLink, // "order on WhatsApp" CTA for logged-out visitors
   });
 });
 
@@ -633,7 +834,7 @@ app.post("/api/my/orders/extract", requireRole("customer"), async (c) => {
 
 app.post("/api/my/orders", requireRole("customer"), async (c) => {
   const sess = c.get("session");
-  const { slug, address, lat, lng, address_id, items, note, images } = await c.req.json().catch(() => ({}));
+  const { slug, address, lat, lng, address_id, items, note, images, payment_method } = await c.req.json().catch(() => ({}));
   const provider = await getProviderBySlug(c.env.DB, slug);
   if (!provider) return c.json({ error: "unknown_provider" }, 400);
   if (!Array.isArray(items) || items.length === 0) return c.json({ error: "no_items" }, 400);
@@ -676,8 +877,14 @@ app.post("/api/my/orders", requireRole("customer"), async (c) => {
     items,
     note,
     images: imgs,
+    paymentMethod: payment_method,
   });
   await notifyOrders(c.env, provider.id);
+  // Alert the shop's admins/managers out-of-band — never make the customer wait
+  // on WhatsApp sends, and never fail their order if a send errors.
+  c.executionCtx.waitUntil(
+    notifyManagersNewOrder(c.env, provider, order).catch((e) => console.error("[wa] new-order alert", e))
+  );
   return c.json({ ok: true, order });
 });
 
@@ -765,7 +972,7 @@ app.get("/api/my/orders", requireRole("customer"), async (c) => {
   if (slug) { clauses.push("provider_id = ?"); binds.push(provider?.id || "__none__"); }
   const { results } = await c.env.DB.prepare(
     "SELECT id, provider_id, status, address, created_at, updated_at, " +
-      "(SELECT COALESCE(SUM(qty*unit_price),0) FROM order_items WHERE order_id = orders.id) AS total " +
+      "(SELECT COALESCE(SUM(qty*unit_price),0) FROM order_items WHERE order_id = orders.id) + COALESCE(orders.delivery_fee,0) AS total " +
       `FROM orders WHERE ${clauses.join(" AND ")} ORDER BY created_at DESC`
   )
     .bind(...binds)
@@ -778,21 +985,212 @@ app.get("/api/my/orders/:id", requireRole("customer"), async (c) => {
   const sess = c.get("session");
   const order = await getOrder(c.env.DB, c.req.param("id"));
   if (!order || order.customer_id !== sess.customer_id) return c.json({ error: "not_found" }, 404);
-  // Courier orders are prepaid → give the customer a tappable UPI link to pay from
-  // their own phone (opens GPay/PhonePe). Only while not yet paid and UPI is set up.
+  // A UPI order becomes payable once the shop has accepted it (and priced it):
+  // show a QR + a tappable link, and let them upload the receipt. Nothing to pay
+  // once it's confirmed paid, and never for COD.
   let pay = null;
-  if (order.ship_mode === "courier" && order.payment_status !== "paid" && order.total) {
-    const provider = await getProvider(c.env.DB, order.provider_id);
+  const provider = await getProvider(c.env.DB, order.provider_id);
+  if (order.payment_method === "upi" && order.total && isPayable(provider, order)) {
     if (provider?.upi_id) {
       const amount = (Number(order.total) / 100).toFixed(2);
       const payee = provider.upi_name || provider.name;
+      const upi = upiString(provider, order);
+      // Signed, short-lived, order-scoped token so the "Save QR" download works
+      // even when WhatsApp's in-app browser drops the session cookie on a download.
+      const qrToken = await mintLinkToken(c.env, { qr: order.id });
       pay = {
         amount,
-        upi: `upi://pay?pa=${encodeURIComponent(provider.upi_id)}&pn=${encodeURIComponent(payee)}&am=${amount}&cu=INR&tr=${encodeURIComponent(order.id)}&tn=${encodeURIComponent("Order " + order.id)}`,
+        upi,
+        upi_id: provider.upi_id,
+        upi_name: payee,
+        // Scanned from another phone; the tappable link covers same-device paying.
+        svg: await QRCode.toString(upi, { type: "svg", margin: 1, errorCorrectionLevel: "M" }),
+        qrUrl: `/api/my/orders/${encodeURIComponent(order.id)}/qr.png?t=${qrToken}`,
+        status: order.payment_status || null, // null | 'submitted' | 'rejected'
+        hasReceipt: !!order.payment_receipt,
       };
+    } else {
+      // Accepted but the shop never configured a VPA — tell the customer plainly
+      // rather than showing a dead QR.
+      pay = { misconfigured: true, status: order.payment_status || null };
     }
   }
-  return c.json({ order, pay });
+  // Label the shop's shipping fee (Courier/Delivery) so the customer sees a clear
+  // Items + fee = Total breakdown.
+  const feeName = order.delivery_fee ? feeLabel(feeKindFor(flowForProvider(provider), provider?.fulfilment)) || "Delivery fee" : null;
+  return c.json({ order, pay, feeLabel: feeName });
+});
+
+// The UPI payment string encoded into the QR (and shown as the payee line).
+// tr = transaction reference (the merchant's order ref — PSPs track/report this,
+// unlike the free-text tn note), so payment emails/reports match back exactly.
+function upiString(provider, order) {
+  const amount = (Number(order.total || 0) / 100).toFixed(2);
+  const payee = provider.upi_name || provider.name;
+  return (
+    `upi://pay?pa=${encodeURIComponent(provider.upi_id)}&pn=${encodeURIComponent(payee)}` +
+    `&am=${amount}&cu=INR&tr=${encodeURIComponent(order.id)}&tn=${encodeURIComponent("Order " + order.id)}`
+  );
+}
+
+// The QR as a downloadable PNG. Deliberately a real URL rather than a client-side
+// canvas → data: URL: these pages open in WhatsApp's in-app browser, where a
+// download anchor on a data: URL is unreliable (it can silently do nothing).
+// A genuine image response with Content-Disposition hits the WebView's download
+// manager, and even where that's blocked the image renders and long-press → Save
+// works. PNG (not the SVG we render on-page) because no gallery or UPI
+// "Scan from gallery" reads SVG.
+app.get("/api/my/orders/:id/qr.png", async (c) => {
+  const id = c.req.param("id");
+  // NOT cookie-gated: WhatsApp's in-app browser hands a download/new-tab image
+  // request to a context that drops the session cookie (hence the "unauthorized"
+  // customers were seeing). So the link carries its own signed, short-lived token
+  // (?t=…, minted alongside the order's pay info). A live session cookie still
+  // works too, for a normal browser opening the image inline.
+  const token = c.req.query("t");
+  let order = null;
+  const claims = token ? await verifyLinkToken(c.env, token) : null;
+  if (claims?.qr && claims.qr === id) {
+    order = await getOrder(c.env.DB, id);
+  } else {
+    const sess = await readSession(c.env, getCookie(c, COOKIE_NAME));
+    if (sess?.role === "customer") {
+      const o = await getOrder(c.env.DB, id);
+      if (o && o.customer_id === sess.customer_id) order = o;
+    }
+  }
+  if (!order) return c.text("unauthorized", 401);
+  const provider = await getProvider(c.env.DB, order.provider_id);
+  if (order.payment_method !== "upi" || !order.total || !provider?.upi_id || !isPayable(provider, order)) {
+    return c.text("nothing_to_pay", 404);
+  }
+  const png = await qrPng(upiString(provider, order));
+  return new Response(png, {
+    headers: {
+      "content-type": "image/png",
+      // inline, NOT attachment. The link carries download="…", which saves it in a
+      // normal browser; but if a WebView ignores that attribute it just navigates
+      // here — and inline means the QR displays so they can long-press → Save.
+      // With attachment, that same case can silently do nothing. The filename hint
+      // still applies whenever the browser does download it.
+      "content-disposition": `inline; filename="${order.id}-upi-qr.png"`,
+      // The amount is baked in, so a stale copy could show the wrong price.
+      "cache-control": "no-store",
+    },
+  });
+});
+
+// Serve the courier receipt image bytes for an order. NOT cookie-gated — WhatsApp
+// fetches this URL server-side (to show as a shipment-notice header), so it takes
+// a signed, order-scoped token (?t=…). Decodes the stored data URL to raw bytes.
+app.get("/api/my/orders/:id/courier-receipt", async (c) => {
+  const id = c.req.param("id");
+  const token = c.req.query("t");
+  let order = null;
+  const claims = token ? await verifyLinkToken(c.env, token) : null;
+  if (claims?.oimg && claims.oimg === id) {
+    order = await getOrder(c.env.DB, id);
+  } else {
+    const sess = await readSession(c.env, getCookie(c, COOKIE_NAME));
+    if (sess?.role === "customer") {
+      const o = await getOrder(c.env.DB, id);
+      if (o && o.customer_id === sess.customer_id) order = o;
+    }
+  }
+  if (!order?.courier_receipt) return c.text("not_found", 404);
+  const m = /^data:(image\/[a-z0-9.+-]+);base64,(.+)$/i.exec(order.courier_receipt);
+  if (!m) return c.text("not_found", 404);
+  const bin = atob(m[2]);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Response(bytes, { headers: { "content-type": m[1], "cache-control": "no-store" } });
+});
+
+// Payable = the shop has accepted (so the price is settled) and it isn't paid yet.
+// Anything at or past the flow's accept step qualifies; REQUESTED/QUOTED/rejected don't.
+function isPayable(provider, order) {
+  if (order.payment_status === "paid") return false;
+  const flow = flowForProvider(provider);
+  const dec = flow?.decision;
+  if (!dec) return false;
+  if (order.status === dec.reject || order.status === dec.from || order.status === "QUOTED") return false;
+  return true;
+}
+
+// Customer uploads proof of payment. Groq reads it to pre-fill the shop's review,
+// but the shop still confirms — so a bad read never moves money on its own, and a
+// Groq outage must not block the upload.
+app.post("/api/my/orders/:id/receipt", requireRole("customer"), async (c) => {
+  const sess = c.get("session");
+  const { image } = await c.req.json().catch(() => ({}));
+  // getOrder (not a raw row) — the mismatch check below needs the computed
+  // `total`, which a raw SELECT doesn't carry.
+  const order = await getOrder(c.env.DB, c.req.param("id"));
+  if (!order || order.customer_id !== sess.customer_id) return c.json({ error: "not_found" }, 404);
+  if (order.payment_status === "paid") return c.json({ error: "already_paid" }, 409);
+  if (order.payment_method !== "upi") return c.json({ error: "not_a_upi_order" }, 400);
+  if (typeof image !== "string" || !image.startsWith("data:image/") || image.length > 900_000) {
+    return c.json({ error: "bad_image" }, 400);
+  }
+  const read = await extractReceipt(c.env, c.env.DB, image).catch(() => ({ ok: false, error: "extract_failed" }));
+  // Flag a mismatch for the admin rather than rejecting — the customer may have
+  // paid a different amount, or the OCR may simply be wrong. The shop decides.
+  const extracted = read.ok
+    ? { ...read, expected: order.total, mismatch: read.amount != null && read.amount !== order.total }
+    : { ok: false, error: read.error || "extract_failed" };
+  const ts = now();
+  await c.env.DB
+    .prepare(
+      "UPDATE orders SET payment_receipt = ?, payment_receipt_at = ?, payment_extracted = ?, payment_status = 'submitted', updated_at = ? WHERE id = ?"
+    )
+    .bind(image, ts, JSON.stringify(extracted), ts, order.id)
+    .run();
+  await notifyOrders(c.env, order.provider_id);
+  return c.json({ ok: true, extracted });
+});
+
+// Shop confirms (or rejects) the customer's payment. Confirming is what unlocks
+// the rest of the flow for a UPI order — see the payment gate in transitionOrder.
+app.post("/api/admin/orders/:id/payment", requireRole("admin", "super_admin", "manager"), async (c) => {
+  const sess = c.get("session");
+  const { action, amount, ref, payer } = await c.req.json().catch(() => ({}));
+  // getOrder (not a raw row) — `total` is computed from order_items, so a raw
+  // SELECT would record a null amount on confirm.
+  const order = await getOrder(c.env.DB, c.req.param("id"));
+  if (!order) return c.json({ error: "not_found" }, 404);
+  const scope = providerScope(sess);
+  if (sess.role !== "super_admin" && !scope) return c.json({ error: "forbidden" }, 403);
+  if (scope && order.provider_id !== scope) return c.json({ error: "forbidden" }, 403);
+  if (action !== "confirm" && action !== "reject") return c.json({ error: "bad_action" }, 400);
+
+  const ts = now();
+  if (action === "reject") {
+    // Keep the receipt on file so the shop can still see what was sent; the
+    // customer can upload a corrected one (that flips it back to 'submitted').
+    await c.env.DB
+      .prepare("UPDATE orders SET payment_status = 'rejected', updated_at = ? WHERE id = ?")
+      .bind(ts, order.id)
+      .run();
+  } else {
+    // Prefer what the admin typed; fall back to what Groq read off the receipt.
+    let ex = {};
+    try { ex = JSON.parse(order.payment_extracted || "{}"); } catch { /* not readable */ }
+    const amt = Number.isFinite(+amount) && +amount > 0 ? Math.round(+amount) : ex.amount ?? order.total ?? null;
+    await c.env.DB
+      .prepare(
+        "UPDATE orders SET payment_status = 'paid', payment_amount = ?, payment_ref = ?, payment_payer = ?, payment_at = ?, updated_at = ? WHERE id = ?"
+      )
+      .bind(amt, (ref || ex.ref || "UPI").toString().slice(0, 64), (payer || ex.payer || null)?.toString().slice(0, 120) || null, ts, ts, order.id)
+      .run();
+  }
+  await notifyOrders(c.env, order.provider_id);
+  const updated = await getOrder(c.env.DB, order.id);
+  // Tell the customer when payment is CONFIRMED (not on reject). Out-of-band so
+  // the admin's click returns immediately and a WA hiccup can't fail the confirm.
+  if (action === "confirm") {
+    c.executionCtx.waitUntil(notifyPaymentConfirmed(c.env, updated));
+  }
+  return c.json({ ok: true, order: updated });
 });
 
 // Customer accepts or rejects a quoted (priced) order. Their call alone advances
@@ -819,6 +1217,30 @@ app.post("/api/my/orders/:id/confirm", requireRole("customer"), async (c) => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Resolve which provider(s) the caller may act on.
+// Only the three payment settings are storable; anything else falls back to COD
+// (the safe default — it never gates a shop's orders behind an unpaid UPI check).
+function payMethod(v) {
+  return v === "upi" || v === "both" ? v : "cod";
+}
+
+// Whether an order can carry a shop-set shipping fee, and what to call it.
+// Courier flow / courier fulfilment → "courier"; a delivery-capable flow → "delivery";
+// on-site (plumber/appliance, no delivery) → null (no fee).
+function feeKindFor(flow, fulfilment) {
+  if (flow?.agentTerm === "Courier" || fulfilment === "courier") return "courier";
+  const delivers = (flow?.assignments || []).some((a) => a.role === "delivery");
+  if (delivers || fulfilment === "delivery" || fulfilment === "both") return "delivery";
+  return null;
+}
+const feeLabel = (kind) => (kind === "courier" ? "Courier fee" : kind === "delivery" ? "Delivery fee" : null);
+
+// A catalog item photo: keep it only if it's a data:image URL within the D1
+// row-size cap (client downscales first); anything else → null (clears the image).
+function cleanItemImage(v) {
+  return typeof v === "string" && v.startsWith("data:image/") && v.length < 900_000 ? v : null;
+}
+
+
 function providerScope(sess) {
   return sess.role === "super_admin" ? null : sess.provider_id; // null = all
 }
@@ -892,7 +1314,7 @@ app.get("/api/admin/orders", requireRole("admin", "super_admin", "manager"), asy
   }
   const where = clauses.length ? "WHERE " + clauses.join(" AND ") : "";
   const { results } = await c.env.DB.prepare(
-    `SELECT *, (SELECT COALESCE(SUM(qty*unit_price),0) FROM order_items WHERE order_id = orders.id) AS total ` +
+    `SELECT *, (SELECT COALESCE(SUM(qty*unit_price),0) FROM order_items WHERE order_id = orders.id) + COALESCE(orders.delivery_fee,0) AS total ` +
       `FROM orders ${where} ORDER BY created_at DESC LIMIT 500`
   )
     .bind(...binds)
@@ -912,13 +1334,30 @@ app.get("/api/admin/orders/:id", requireRole("admin", "super_admin", "manager"),
   const captains = await listCaptains(c.env.DB, order.provider_id);
   const prov = await getProvider(c.env.DB, order.provider_id);
   const flow = flowForProvider(prov);
-  return c.json({ order, customer, allowedNext: allowedTransitions(flow, order.status), captains, flow, fulfilment: prov?.fulfilment || "delivery" });
+  // What Groq read off the receipt, for the shop to sanity-check against the total.
+  let payExtracted = null;
+  try { payExtracted = order.payment_extracted ? JSON.parse(order.payment_extracted) : null; } catch { /* unreadable */ }
+  // A UPI order can't leave the accept step until payment is confirmed — tell the
+  // UI so it can explain the block instead of just failing the advance.
+  const paymentBlocked =
+    order.payment_method === "upi" && order.payment_status !== "paid" && order.status === flow?.decision?.accept;
+  return c.json({
+    order,
+    customer,
+    allowedNext: allowedTransitions(flow, order.status),
+    captains,
+    flow,
+    fulfilment: prov?.fulfilment || "delivery",
+    payExtracted,
+    paymentBlocked,
+    feeKind: feeKindFor(flow, prov?.fulfilment), // 'courier' | 'delivery' | null → fee input + label
+  });
 });
 
 // Advance status / assign captain → fires the WhatsApp notification.
 app.patch("/api/admin/orders/:id/status", requireRole("admin", "super_admin", "manager"), async (c) => {
   const sess = c.get("session");
-  const { status, agentName, captainPhone, shipMode, courierName, courierTracking, assignees } = await c.req.json().catch(() => ({}));
+  const { status, agentName, captainPhone, shipMode, courierName, courierTracking, courierReceipt, assignees } = await c.req.json().catch(() => ({}));
   const order = await c.env.DB.prepare("SELECT * FROM orders WHERE id = ?").bind(c.req.param("id")).first();
   if (!order) return c.json({ error: "not_found" }, 404);
   const scope = providerScope(sess);
@@ -937,6 +1376,7 @@ app.patch("/api/admin/orders/:id/status", requireRole("admin", "super_admin", "m
       shipMode,
       courierName,
       courierTracking,
+      courierReceipt: cleanItemImage(courierReceipt),
       assignees,
     });
     await notifyOrders(c.env, order.provider_id);
@@ -950,7 +1390,7 @@ app.patch("/api/admin/orders/:id/status", requireRole("admin", "super_admin", "m
 // keep/delete/adjust what Groq extracted. Only while still REQUESTED (pre-accept).
 app.patch("/api/admin/orders/:id/items", requireRole("admin", "super_admin", "manager"), async (c) => {
   const sess = c.get("session");
-  const { items } = await c.req.json().catch(() => ({}));
+  const { items, deliveryFee } = await c.req.json().catch(() => ({}));
   const order = await getOrder(c.env.DB, c.req.param("id"));
   if (!order) return c.json({ error: "not_found" }, 404);
   const scope = providerScope(sess);
@@ -960,6 +1400,11 @@ app.patch("/api/admin/orders/:id/items", requireRole("admin", "super_admin", "ma
   if (!Array.isArray(items) || items.length === 0) return c.json({ error: "no_items" }, 400);
   // Admin may set explicit prices here (to quote photo/list items not on the menu).
   await replaceOrderItems(c.env.DB, order.id, order.provider_id, items, true);
+  // Optional shop-set courier/delivery fee (paise), added to the order total.
+  if (deliveryFee !== undefined) {
+    const fee = Number.isFinite(+deliveryFee) && +deliveryFee > 0 ? Math.round(+deliveryFee) : 0;
+    await c.env.DB.prepare("UPDATE orders SET delivery_fee = ? WHERE id = ?").bind(fee, order.id).run();
+  }
   return c.json({ ok: true, order: await getOrder(c.env.DB, order.id) });
 });
 
@@ -1022,9 +1467,16 @@ app.get("/api/admin/meta", requireRole("admin", "super_admin", "manager"), async
 
 // Town config for the SPAs: brand + the default vertical's flow (single-vertical
 // apps use this; the marketplace SPA fetches flow per provider via /api/flow).
-app.get("/api/config", (c) => {
+app.get("/api/config", async (c) => {
   const cfg = c.get("config");
-  return c.json({ brand: cfg.brand, defaultVertical: cfg.defaultVertical || null, flow: flowForVertical(cfg.defaultVertical) });
+  // A one-shop town has no marketplace, so "/" is that shop's storefront.
+  const only = await soleProvider(c.env.DB).catch(() => null);
+  return c.json({
+    brand: cfg.brand,
+    defaultVertical: cfg.defaultVertical || null,
+    flow: flowForVertical(cfg.defaultVertical),
+    soleProvider: only?.slug || null,
+  });
 });
 
 // The town's active verticals — for the customer "pick a service" chooser. Public.
@@ -1187,13 +1639,13 @@ app.delete("/api/console/providers/:id/categories/:catId", requireRole("super_ad
 });
 
 app.post("/api/console/providers/:id/catalog", requireRole("super_admin", "manager"), providerManage, async (c) => {
-  const { name, unit, price, category } = await c.req.json().catch(() => ({}));
+  const { name, unit, price, category, description, image } = await c.req.json().catch(() => ({}));
   if (!name) return c.json({ error: "missing" }, 400);
   const id = randomId();
   await c.env.DB.prepare(
-    "INSERT INTO catalog_items (id, provider_id, name, category, unit, price, active) VALUES (?,?,?,?,?,?,1)"
+    "INSERT INTO catalog_items (id, provider_id, name, category, unit, price, active, description, image) VALUES (?,?,?,?,?,?,1,?,?)"
   )
-    .bind(id, c.req.param("id"), name, category?.trim() || null, unit || "piece", parseInt(price, 10) || 0)
+    .bind(id, c.req.param("id"), name, category?.trim() || null, unit || "piece", parseInt(price, 10) || 0, description?.trim() || null, cleanItemImage(image))
     .run();
   await ensureCategory(c.env.DB, c.req.param("id"), category); // auto-add a new category
   return c.json({ ok: true, id });
@@ -1212,8 +1664,10 @@ app.patch("/api/console/providers/:id/catalog/:itemId", requireRole("super_admin
   const price = body.price !== undefined ? Math.max(0, parseInt(body.price, 10) || 0) : cur.price;
   const active = body.active !== undefined ? (body.active ? 1 : 0) : cur.active;
   const available = body.available !== undefined ? (body.available ? 1 : 0) : (cur.available ?? 1);
-  await c.env.DB.prepare("UPDATE catalog_items SET name = ?, category = ?, unit = ?, price = ?, active = ?, available = ? WHERE id = ?")
-    .bind(name, category, unit, price, active, available, cur.id)
+  const description = body.description !== undefined ? (body.description?.trim() || null) : (cur.description ?? null);
+  const image = body.image !== undefined ? cleanItemImage(body.image) : (cur.image ?? null);
+  await c.env.DB.prepare("UPDATE catalog_items SET name = ?, category = ?, unit = ?, price = ?, active = ?, available = ?, description = ?, image = ? WHERE id = ?")
+    .bind(name, category, unit, price, active, available, description, image, cur.id)
     .run();
   await ensureCategory(c.env.DB, c.req.param("id"), category);
   return c.json({ ok: true });
@@ -1322,12 +1776,12 @@ app.delete("/api/control/verticals/:slug", requireControlToken, async (c) => {
 
 // Providers.
 app.get("/api/control/providers", requireControlToken, async (c) => {
-  const { results } = await c.env.DB.prepare("SELECT id, slug, name, vertical, photo_order, fulfilment, code, upi_id, upi_name FROM service_providers ORDER BY vertical, name").all();
+  const { results } = await c.env.DB.prepare("SELECT id, slug, name, vertical, photo_order, fulfilment, payment_method, code, upi_id, upi_name FROM service_providers ORDER BY vertical, name").all();
   return c.json({ providers: results || [] });
 });
 const FULFILMENTS = ["delivery", "courier", "both"];
 app.post("/api/control/providers", requireControlToken, async (c) => {
-  const { slug: rawSlug, name, vertical, photo_order, fulfilment, upi_id, upi_name } = await c.req.json().catch(() => ({}));
+  const { slug: rawSlug, name, vertical, photo_order, fulfilment, payment_method, upi_id, upi_name } = await c.req.json().catch(() => ({}));
   // Slug is URL path (/{slug}/app) → must be URL-safe. Slugify defensively so a
   // name like "Ravi Chicken" can't be stored as "ravi chicken".
   const slug = String(rawSlug || name || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
@@ -1335,8 +1789,8 @@ app.post("/api/control/providers", requireControlToken, async (c) => {
   const ful = FULFILMENTS.includes(fulfilment) ? fulfilment : "delivery";
   const id = randomId();
   try {
-    await c.env.DB.prepare("INSERT INTO service_providers (id, slug, name, vertical, photo_order, fulfilment, config, upi_id, upi_name, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)")
-      .bind(id, slug, name, vertical, photo_order ? 1 : 0, ful, "{}", upi_id || null, upi_name || null, now()).run();
+    await c.env.DB.prepare("INSERT INTO service_providers (id, slug, name, vertical, photo_order, fulfilment, payment_method, config, upi_id, upi_name, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
+      .bind(id, slug, name, vertical, photo_order ? 1 : 0, ful, payMethod(payment_method), "{}", upi_id || null, upi_name || null, now()).run();
   } catch (e) {
     return c.json({ error: "slug_taken_or_invalid", detail: String(e) }, 400);
   }
@@ -1364,13 +1818,14 @@ app.patch("/api/control/providers/:id", requireControlToken, async (c) => {
     } else if (cand) code = cand;
   }
   try {
-    await c.env.DB.prepare("UPDATE service_providers SET name=?, slug=?, vertical=?, photo_order=?, fulfilment=?, code=?, upi_id=?, upi_name=? WHERE id=?")
+    await c.env.DB.prepare("UPDATE service_providers SET name=?, slug=?, vertical=?, photo_order=?, fulfilment=?, payment_method=?, code=?, upi_id=?, upi_name=? WHERE id=?")
       .bind(
         b.name?.trim() || cur.name,
         slug,
         b.vertical || cur.vertical,
         b.photo_order !== undefined ? (b.photo_order ? 1 : 0) : (cur.photo_order || 0),
         ful,
+        b.payment_method !== undefined ? payMethod(b.payment_method) : (cur.payment_method || "cod"),
         code || null,
         b.upi_id !== undefined ? b.upi_id || null : cur.upi_id,
         b.upi_name !== undefined ? b.upi_name || null : cur.upi_name,
