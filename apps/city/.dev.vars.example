@@ -1,0 +1,5 @@
+# Copy to .dev.vars for local `wrangler dev` (git-ignored). In production set
+# these with `wrangler secret put <NAME>` instead. Only SESSION_SECRET is
+# required to boot — WhatsApp/Groq/Maps are configured in the dashboard.
+SESSION_SECRET=change-me-to-a-long-random-string
+PUBLIC_HOST=localhost:8790

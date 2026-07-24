@@ -1,0 +1,14 @@
+{
+  "name": "Field agent — Manasanta",
+  "short_name": "Agent",
+  "description": "Assigned jobs for Manasanta field agents (pickup, delivery, on-site).",
+  "start_url": "/captain",
+  "scope": "/captain",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f4f3ee",
+  "theme_color": "#0e8074",
+  "icons": [
+    { "src": "/captain-icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

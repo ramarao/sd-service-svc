@@ -160,6 +160,8 @@ export async function deployTown(env, db, target, spec, { dryRun = true } = {}) 
     "ALTER TABLE orders ADD COLUMN payment_requested_at INTEGER",
     "ALTER TABLE orders ADD COLUMN delivery_fee INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE orders ADD COLUMN courier_receipt TEXT",
+    "ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE platform_settings ADD COLUMN brand_name TEXT",
     // Courier providers are prepaid by definition — align any that predate this column.
     "UPDATE service_providers SET payment_method = 'upi' WHERE vertical IN (SELECT slug FROM verticals WHERE flow = 'courier')",
   ]) {

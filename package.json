@@ -18,7 +18,9 @@
     "dev:admin": "wrangler dev -c apps/admin/wrangler.jsonc --port 8791",
     "deploy:admin": "wrangler deploy -c apps/admin/wrangler.jsonc",
     "build:town-bundle": "node scripts/build-town-bundle.mjs",
-    "setup:email": "node scripts/setup-email-routing.mjs"
+    "setup:email": "node scripts/setup-email-routing.mjs",
+    "dev:city": "wrangler dev -c apps/city/wrangler.jsonc --port 8790",
+    "deploy:city": "wrangler deploy -c apps/city/wrangler.jsonc"
   },
   "dependencies": {
     "hono": "^4.6.14",

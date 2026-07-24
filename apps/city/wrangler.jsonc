@@ -1,0 +1,46 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  // Rename per city, e.g. "sd-tanuku-svc".
+  "name": "sd-city-svc",
+  "main": "src/index.js",
+  "compatibility_date": "2026-07-09",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+
+  "workers_dev": true,
+
+  // This city's custom domain (the zone must be in your Cloudflare account).
+  // Remove this block to run on the workers.dev URL only.
+  "routes": [
+    { "pattern": "example.com", "custom_domain": true }
+  ],
+
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/auth/*", "/webhook/*"]
+  },
+
+  // This city's own D1. Create with `wrangler d1 create sd-city-db` and paste the
+  // id below. (Local `wrangler dev --local` keys on database_name, so it works
+  // before the remote DB exists.)
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "sd-city-db",
+      "database_id": "00000000-0000-0000-0000-000000000000"
+    }
+  ],
+
+  "durable_objects": {
+    "bindings": [{ "name": "ORDERS_HUB", "class_name": "OrdersHub" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["OrdersHub"] }]
+
+  // Only ONE secret is required to boot: SESSION_SECRET.
+  //   wrangler secret put SESSION_SECRET   (any long random string)
+  //   wrangler secret put PUBLIC_HOST      (this city's domain, for WhatsApp links)
+  // Everything else — WhatsApp token/app-secret/verify/phone-number-id, Groq &
+  // Maps keys — is set in the dashboard (/console → Settings), not as secrets.
+}

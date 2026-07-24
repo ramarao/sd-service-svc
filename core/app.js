@@ -158,7 +158,8 @@ async function handleWebhook(env, body) {
     : null;
 
   const host = env.PUBLIC_HOST || CONFIG?.brand?.host || "dhobi-demo.manasanta.in";
-  const townName = CONFIG?.brand?.name || provider?.name || "us";
+  const settings = await getSettings(env.DB).catch(() => null);
+  const townName = settings?.brand_name || CONFIG?.brand?.name || provider?.name || "us";
   const logo = CONFIG?.brand?.logo || null; // optional image header on CTA buttons
   const waCfg = await getWaConfig(env, env.DB, provider); // null provider → platform creds
   // Show "typing…" (and mark the message read) the moment anything lands, before
@@ -467,20 +468,37 @@ app.post("/auth/otp/verify", async (c) => {
 app.post("/auth/admin/login", async (c) => {
   const { email, password } = await c.req.json().catch(() => ({}));
   if (!email || !password) return c.json({ error: "missing" }, 400);
-  const user = await c.env.DB.prepare("SELECT * FROM users WHERE email = ? AND role IN ('admin','super_admin')")
-    .bind(String(email).toLowerCase())
+  const emailLc = String(email).toLowerCase();
+  let user = await c.env.DB.prepare("SELECT * FROM users WHERE email = ? AND role IN ('admin','super_admin')")
+    .bind(emailLc)
     .first();
-  if (!user || !(await verifyPassword(password, user.pass_hash))) {
+  // First-run bootstrap: a fresh city has NO admin. The first login with
+  // admin/admin creates the super-admin and forces a password change. Once any
+  // admin exists (or the password is changed), admin/admin no longer works.
+  if (!user) {
+    const existing = await c.env.DB.prepare("SELECT COUNT(*) AS n FROM users WHERE role IN ('admin','super_admin')").first();
+    if ((existing?.n || 0) === 0 && emailLc === "admin" && password === "admin") {
+      const id = randomId();
+      await c.env.DB
+        .prepare("INSERT INTO users (id, role, email, pass_hash, must_change_password, created_at) VALUES (?, 'super_admin', 'admin', ?, 1, ?)")
+        .bind(id, await hashPassword("admin"), now())
+        .run();
+      user = { id, role: "super_admin", email: "admin", provider_id: null, must_change_password: 1, pass_hash: null };
+    }
+  }
+  if (!user || (user.pass_hash && !(await verifyPassword(password, user.pass_hash)))) {
     return c.json({ error: "invalid_credentials" }, 401);
   }
+  const mustChange = !!user.must_change_password;
   const token = await issueSession(c.env, {
     role: user.role,
     user_id: user.id,
     provider_id: user.provider_id || null,
     email: user.email,
+    ...(mustChange ? { must_change: 1 } : {}),
   });
   setCookie(c, COOKIE_NAME, token, sessionCookieOpts);
-  return c.json({ ok: true, role: user.role });
+  return c.json({ ok: true, role: user.role, mustChange });
 });
 
 app.post("/auth/logout", (c) => {
@@ -739,9 +757,28 @@ app.post("/api/account/password", requireRole("admin", "super_admin"), async (c)
   if (!user || !(await verifyPassword(current, user.pass_hash))) {
     return c.json({ error: "wrong_current_password" }, 401);
   }
-  await c.env.DB.prepare("UPDATE users SET pass_hash = ? WHERE id = ?")
+  await c.env.DB.prepare("UPDATE users SET pass_hash = ?, must_change_password = 0 WHERE id = ?")
     .bind(await hashPassword(next), user.id)
     .run();
+  return c.json({ ok: true });
+});
+
+// First-run forced password change. Only valid while the account is flagged
+// must_change_password (the admin/admin bootstrap) — no current password needed
+// since they just authenticated. Sets the new password, clears the flag, and
+// re-issues the session so the "must change" gate lifts immediately.
+app.post("/api/account/set-password", requireRole("admin", "super_admin"), async (c) => {
+  const sess = c.get("session");
+  const { next } = await c.req.json().catch(() => ({}));
+  if (!next || String(next).length < 8) return c.json({ error: "too_short" }, 400);
+  const user = await c.env.DB.prepare("SELECT * FROM users WHERE id = ?").bind(sess.user_id).first();
+  if (!user) return c.json({ error: "not_found" }, 404);
+  if (!user.must_change_password) return c.json({ error: "not_required" }, 409);
+  await c.env.DB.prepare("UPDATE users SET pass_hash = ?, must_change_password = 0 WHERE id = ?")
+    .bind(await hashPassword(next), user.id)
+    .run();
+  const token = await issueSession(c.env, { role: user.role, user_id: user.id, provider_id: user.provider_id || null, email: user.email });
+  setCookie(c, COOKIE_NAME, token, sessionCookieOpts);
   return c.json({ ok: true });
 });
 
@@ -1471,8 +1508,12 @@ app.get("/api/config", async (c) => {
   const cfg = c.get("config");
   // A one-shop town has no marketplace, so "/" is that shop's storefront.
   const only = await soleProvider(c.env.DB).catch(() => null);
+  // The dashboard-set city name (platform_settings.brand_name) overrides the
+  // build-time config brand, so a fresh city sets its own name without redeploy.
+  const s = await getSettings(c.env.DB).catch(() => null);
+  const brand = { ...cfg.brand, name: s?.brand_name || cfg.brand?.name };
   return c.json({
-    brand: cfg.brand,
+    brand,
     defaultVertical: cfg.defaultVertical || null,
     flow: flowForVertical(cfg.defaultVertical),
     soleProvider: only?.slug || null,
@@ -1531,6 +1572,7 @@ app.get("/api/console/settings", requireRole("super_admin"), async (c) => {
     maps_set: olaConfigured(s),
     groq_set: !!s?.groq_api_key,
     wa_display_number: s?.wa_display_number || "",
+    brand_name: s?.brand_name || "",
     updated_at: s?.updated_at || null,
   });
 });
@@ -1549,14 +1591,15 @@ app.post("/api/console/settings", requireRole("super_admin"), async (c) => {
   const displayNumber = body.wa_display_number !== undefined
     ? String(body.wa_display_number).replace(/[^\d]/g, "") || null
     : cur.wa_display_number || null;
+  const brandName = body.brand_name !== undefined ? (String(body.brand_name).trim() || null) : (cur.brand_name || null);
   await c.env.DB.prepare(
-    "INSERT INTO platform_settings (id, wa_verify_token, wa_app_secret, wa_token, wa_api_version, ola_maps_api_key, groq_api_key, wa_display_number, updated_at) " +
-      "VALUES ('global',?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET " +
+    "INSERT INTO platform_settings (id, wa_verify_token, wa_app_secret, wa_token, wa_api_version, ola_maps_api_key, groq_api_key, wa_display_number, brand_name, updated_at) " +
+      "VALUES ('global',?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET " +
       "wa_verify_token=excluded.wa_verify_token, wa_app_secret=excluded.wa_app_secret, " +
       "wa_token=excluded.wa_token, wa_api_version=excluded.wa_api_version, " +
-      "ola_maps_api_key=excluded.ola_maps_api_key, groq_api_key=excluded.groq_api_key, wa_display_number=excluded.wa_display_number, updated_at=excluded.updated_at"
+      "ola_maps_api_key=excluded.ola_maps_api_key, groq_api_key=excluded.groq_api_key, wa_display_number=excluded.wa_display_number, brand_name=excluded.brand_name, updated_at=excluded.updated_at"
   )
-    .bind(verify, appSecret, token, apiVersion, olaKey, groqKey, displayNumber, now())
+    .bind(verify, appSecret, token, apiVersion, olaKey, groqKey, displayNumber, brandName, now())
     .run();
   return c.json({ ok: true });
 });
